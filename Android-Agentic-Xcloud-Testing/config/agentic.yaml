@@ -1,0 +1,213 @@
+# ===========================================================================
+#  agentic.yaml - the ONLY place behaviour is declared.
+#
+#  Design rule for this whole folder: no test knowledge in Python.
+#  * WHAT to test          -> scenarios/*.yaml|md|txt (free text is fine)
+#  * WHICH controls exist  -> ../config/controls.yaml (discovered at runtime)
+#  * HOW agents behave     -> this file
+#
+#  Anything you can imagine wanting to change without a code review lives here.
+#  Every value below is read through a `.get(key, default)`, so deleting a key
+#  is safe - you get the documented default, not a KeyError.
+# ===========================================================================
+
+meta:
+  version: 1
+  description: "Multi-agent Android/xCloud test runner configuration"
+
+# ---------------------------------------------------------------------------
+# LLM PROVIDERS
+# Resolved at runtime by agentic/llm.py. `active` picks a profile; each agent
+# may override it (a cheap model routes, an expensive one does RCA).
+#
+# api_key_env names the ENV VAR - never put a key in this file.
+# ---------------------------------------------------------------------------
+llm:
+  active: "openai"
+
+  profiles:
+    openai:
+      provider: "openai"           # -> langchain_openai.ChatOpenAI
+      model: "gpt-4o-mini"
+      temperature: 0.0             # tests must be reproducible
+      api_key_env: "OPENAI_API_KEY"
+      supports_vision: true
+
+    openai_strong:
+      provider: "openai"
+      model: "gpt-4o"
+      temperature: 0.1
+      api_key_env: "OPENAI_API_KEY"
+      supports_vision: true
+
+    anthropic:
+      provider: "anthropic"
+      model: "claude-sonnet-4-20250514"
+      temperature: 0.0
+      api_key_env: "ANTHROPIC_API_KEY"
+      supports_vision: true
+
+    gemini:
+      provider: "google_genai"
+      model: "gemini-2.0-flash"
+      temperature: 0.0
+      api_key_env: "GOOGLE_API_KEY"
+      supports_vision: true
+
+    local:
+      provider: "ollama"           # no API key, good for CI
+      model: "qwen2.5:14b-instruct"
+      temperature: 0.0
+      base_url: "http://localhost:11434"
+      supports_vision: false
+
+  # Per-agent overrides. Omit an agent and it uses `active`.
+  agent_profiles:
+    planner: "openai"
+    rca: "openai_strong"           # root cause is where reasoning pays off
+    observer: "openai"             # must be a vision profile if vision.enabled
+
+# ---------------------------------------------------------------------------
+# HARDWARE / TRANSPORT
+# Paths are relative to THIS folder's parent, so the agentic layer never
+# duplicates the control map - it imports the verified one.
+# ---------------------------------------------------------------------------
+hardware:
+  controls_config: "../config/controls.yaml"
+  pad_module_dir: "../host"        # where pad_link.py lives
+  transport: null                  # null = the profile marked `default:`
+  serial_port: null                # null = controls.yaml, then auto-detect
+  dry_run: false                   # true = plan + reason, never touch the port
+
+# ---------------------------------------------------------------------------
+# ANDROID / ADB
+# adb is OPTIONAL. Without it the run still works, but the ObserverAgent has no
+# eyes and the DeviceAgent can only confirm the pad, not the phone's UI state.
+# Every one of these is a HINT for discovery, never an assumption:
+# DeviceAgent asks the phone what is installed and what is focused.
+# ---------------------------------------------------------------------------
+android:
+  adb_path: "adb"                  # or an absolute path
+  serial: null                     # null = the single attached device
+  required: false                  # true = abort the run when adb is missing
+
+  # xCloud is a PWA, NOT an installed app. There is no package to launch and
+  # no activity to assert on: it is a page inside a browser (often installed
+  # as a WebAPK, which is why the package name varies per device and per
+  # install method). So we never name a package - we discover browsers on the
+  # device and let the agents reason about what they find.
+  pwa:
+    url: "https://www.xbox.com/play"
+    # Discovery hints only. DeviceAgent matches installed packages against
+    # these substrings; add yours if you use a different browser. If none
+    # match, the agents are told that and adapt - they do not crash.
+    browser_hints: ["chrome", "edge", "firefox", "samsung", "brave", "opera"]
+    # A WebAPK's package usually contains this marker. Used to REPORT what was
+    # found, not to decide behaviour.
+    webapk_marker: "webapk"
+    launch_mode: "view_url"        # view_url | already_open | manual
+    # After launching, how long to let the PWA settle before observing.
+    settle_seconds: 6.0
+
+# ---------------------------------------------------------------------------
+# OBSERVATION (closing the "blind automation" loop)
+# ---------------------------------------------------------------------------
+vision:
+  enabled: true
+  screenshot_dir: "artifacts"
+  # Ask the LLM to describe the screenshot. Requires a vision-capable profile.
+  llm_screen_reading: true
+  # Downscale before sending to the model: cheaper, and 720p is plenty to read
+  # a menu. 0 = send the native resolution.
+  max_width: 1280
+  jpeg_quality: 70
+  # Frame-diff sensitivity: fraction of changed pixels that counts as "the
+  # screen reacted". Below this we treat the input as having had NO effect,
+  # which is exactly the failure the parent project could not detect.
+  motion_threshold: 0.01
+  ocr:
+    enabled: true                  # silently skipped if pytesseract is absent
+    lang: "eng"
+
+logs:
+  # Captured around each step so the RCA agent has evidence, not guesses.
+  logcat_enabled: true
+  logcat_lines: 400
+  # Tag filters are hints for RELEVANCE scoring, not a hard filter - we keep
+  # the raw buffer too, because the interesting line is never in the list you
+  # thought of in advance.
+  interesting_patterns:
+    - "xcloud"
+    - "gamepad"
+    - "input"
+    - "usb"
+    - "hid"
+    - "webapk"
+    - "chromium"
+    - "ANR"
+    - "FATAL"
+
+# ---------------------------------------------------------------------------
+# EXECUTION
+# ---------------------------------------------------------------------------
+execution:
+  # plan     = follow the PlannerAgent's steps, observing after each
+  # reactive = ReAct loop; the model picks the next tool from what it SEES.
+  #            Slower and costlier, but it can recover from an unexpected UI.
+  # adaptive = plan first, switch to reactive only when a step's expectation
+  #            is not met. Best default.
+  mode: "adaptive"
+  max_steps: 60                    # hard stop; guards against loops
+  max_reactive_iterations: 12
+  step_timeout_seconds: 45.0
+  # Wait after each input before observing. xCloud adds 60-100ms network
+  # latency ON TOP of its UI animations (see ../config/controls.yaml timing).
+  observe_delay_seconds: 1.5
+  # Release every control when a run ends, however it ends. Non-negotiable:
+  # a crash mid-stick otherwise leaves the character walking into a wall.
+  always_reset_on_exit: true
+
+# ---------------------------------------------------------------------------
+# RETRY / SELF-HEALING
+# ---------------------------------------------------------------------------
+retry:
+  max_replans: 2                   # RCA -> replan cycles before giving up
+  # RCA classifies the cause; only these classes are worth another attempt.
+  # A wiring fault is not going to fix itself on retry - stopping fast and
+  # saying so is more useful than three identical failures.
+  retryable_causes: ["timing", "flaky_ui", "network", "stream_latency"]
+
+# ---------------------------------------------------------------------------
+# REPORTING
+# ---------------------------------------------------------------------------
+report:
+  output_dir: "reports"
+  formats: ["json", "markdown", "html"]
+  include_screenshots: true
+  include_raw_logs: false          # true makes reports big but self-contained
+  # Rendered by the ReporterAgent; unknown keys are ignored, so adding a
+  # section here is safe even if a run has no data for it.
+  sections:
+    - "verdict"
+    - "scenario"
+    - "environment"
+    - "steps"
+    - "evidence"
+    - "root_cause"
+    - "recommendations"
+
+# ---------------------------------------------------------------------------
+# SAFETY - things the agents are forbidden to do, enforced in code, not prompt.
+# A prompt is a request; the tool registry is a wall.
+# ---------------------------------------------------------------------------
+safety:
+  allow_shell: false               # arbitrary `adb shell` for the LLM
+  # Only used when allow_shell is true. Prefix-matched against the command.
+  allowed_shell_prefixes:
+    - "dumpsys "
+    - "pm list "
+    - "getprop"
+    - "wm size"
+    - "input keyevent"
+  forbidden_controls: []           # e.g. ["guide"] if Home hijacks your device
+  max_run_seconds: 900

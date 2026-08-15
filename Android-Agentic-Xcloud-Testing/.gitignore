@@ -1,0 +1,29 @@
+# ---------------------------------------------------------------------------
+#  SECRETS - the important line in this file.
+#  API keys arrive via .env precisely so they never live in a config file that
+#  could be committed. Undoing that here would defeat the whole arrangement.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# ---------------------------------------------------------------------------
+#  RUN OUTPUT
+#  Screenshots of a phone signed in to a real Xbox account: these can contain a
+#  gamertag, a real name, or a friends list. Not repository material.
+#  The JSON report also embeds OCR'd screen text, for the same reason.
+# ---------------------------------------------------------------------------
+artifacts/
+reports/
+
+# ---------------------------------------------------------------------------
+#  PYTHON
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

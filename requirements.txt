@@ -1,0 +1,24 @@
+# Install with:  pip install -r requirements.txt
+
+# Config parsing (config/controls.yaml)
+pyyaml
+
+# THE transport. Everything the PC sends to the pad goes over this, via the
+# FT232RL on COM8. Also used by flash.py to spot the Leonardo's bootloader.
+pyserial
+
+# ---------------------------------------------------------------------------
+# Not required, but the natural next step.
+#
+# Right now the automation is BLIND: a firmware 'OK' proves the HID report was
+# queued, not that the game reacted. To close that loop you need to see the
+# phone screen - mirror it with scrcpy and read frames with OpenCV. That is the
+# role a capture card plays in the console project next door.
+#
+#   choco install scrcpy      (or github.com/Genymobile/scrcpy)
+# opencv-python
+# numpy
+
+# For reading on-screen text (menu titles, "Starting your game", etc.)
+# pytesseract
+# pillow

@@ -1,0 +1,47 @@
+# ===========================================================================
+#  Scenario: does every control on the pad actually reach xCloud?
+#
+#  A regression sweep, not a feature test. Its value is that it fails LOUDLY and
+#  specifically: "rt does nothing, everything else works" is an immediately
+#  actionable fault, while "the controller is broken" is not.
+#
+#  Note what it does NOT claim. Only that each control produced a REACTION - not
+#  that it produced the CORRECT reaction. Verifying semantics per control would
+#  need a known game state, and we do not have one. Saying so plainly is more
+#  useful than pretending the sweep proves more than it does.
+# ===========================================================================
+
+title: "Every gamepad control produces a reaction in xCloud"
+
+intent: >-
+  Exercise each control the rig can send - face buttons, D-pad hat, shoulder
+  buttons, stick clicks, analog triggers and both sticks - and confirm the page
+  reacts to each. This is the agentic equivalent of 3-TEST.bat, except it
+  watches the screen instead of asking a human to.
+
+preconditions:
+  - "xCloud is open and a controller-navigable screen is showing"
+  - "The pad is enumerated by the phone (the board reports a connected host)"
+
+acceptance_criteria:
+  - "Each face button (A, B, X, Y) produces an observable change on screen"
+  - "Each D-pad direction produces an observable change on screen"
+  - "Both analog sticks produce an observable change when deflected"
+  - "Both analog triggers are accepted by the firmware without an error"
+  - "No control leaves an input stuck after the sweep finishes"
+
+out_of_scope:
+  - "Whether each button performs its SEMANTICALLY correct action - that needs a
+     known game state this rig does not establish"
+  - "The Guide/Xbox button, which some Android builds intercept before the page
+     ever sees it, making a negative result uninformative"
+
+notes: >-
+  controls.yaml already ships a `hid_selftest` macro that walks every control.
+  Prefer it over hand-rolling the sequence: it is the project's declared list,
+  so it stays correct when someone adds a control to the YAML.
+
+  Expect B to navigate BACKWARDS. A sweep that presses B repeatedly can walk
+  itself out of the page entirely and then report that later controls "did
+  nothing", which would be true and completely misleading. Plan a way back, or
+  re-establish the screen between groups.

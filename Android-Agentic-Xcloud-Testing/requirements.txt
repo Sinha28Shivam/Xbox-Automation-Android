@@ -1,0 +1,53 @@
+# ===========================================================================
+#  Android-Agentic-Xcloud-Testing - dependencies
+#
+#  Install (from THIS folder):
+#      pip install -r requirements.txt
+#
+#  The hardware layer (../host/pad_link.py) only needs pyyaml + pyserial.
+#  Everything below is the agentic layer on top of it.
+# ===========================================================================
+
+# ---- hardware layer (inherited from the parent project) -------------------
+pyyaml>=6.0
+pyserial>=3.5
+
+# ---- agent framework ------------------------------------------------------
+# langgraph  = the state machine that wires the agents together
+# langchain  = tool abstraction + structured output
+langgraph>=0.2.28
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+
+# ---- schema / validation --------------------------------------------------
+# Every agent returns a validated pydantic object, never a free-text blob we
+# then regex. That is what keeps "dynamic" from becoming "unpredictable".
+pydantic>=2.6
+
+# ---- LLM providers -------------------------------------------------------
+# Install ONLY the one you use. The provider is resolved at RUNTIME from
+# config/agentic.yaml (or env vars), so nothing here is hardcoded in code.
+#
+# openai / azure-openai
+langchain-openai>=0.2.0
+#
+# anthropic
+# langchain-anthropic>=0.2.0
+#
+# google gemini
+# langchain-google-genai>=2.0.0
+#
+# fully local, no API key (recommended for CI):  ollama serve
+# langchain-ollama>=0.2.0
+
+# ---- observation layer (screen understanding) -----------------------------
+# The parent README calls the existing automation "blind": a firmware OK proves
+# the HID report was queued, not that xCloud reacted. These close that loop.
+pillow>=10.0            # decode the adb screencap PNG
+numpy>=1.24             # frame diffing (did the screen change at all?)
+
+# Optional, auto-detected at runtime. Missing ones degrade gracefully - the
+# ObserverAgent reports which sensors were available in every run.
+# opencv-python         # template / motion analysis
+# pytesseract           # on-screen text ("Starting your game", error codes)

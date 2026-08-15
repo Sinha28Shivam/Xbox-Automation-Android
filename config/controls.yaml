@@ -1,0 +1,343 @@
+# ============================================================================
+#  xcloud_controls.yaml - control map for ANDROID xCloud via an Arduino HID pad
+#
+#  Same schema as Xbox-Automation-Python/config/controls.yaml so tooling and
+#  habits transfer. The difference is the `hid` field replaces `gimx`:
+#
+#     controls.yaml : a -> gimx: "cross"     (GIMX uses PlayStation naming)
+#     this file     : a -> hid:  "a"         (firmware maps it to HID button 1)
+#
+#  There is no Guide-button authentication here and no proprietary console
+#  protocol - Android accepts any standard HID gamepad, so names are sane.
+#
+#  Value semantics:
+#     buttons : 1 = pressed, 0 = released
+#     triggers: 0..255 analog. 255 = fully pressed
+#     sticks  : -128..127 per axis, 0 = centered
+#     dpad    : sent as an HID hat switch, not as 4 buttons (Android expects
+#               a hat; sending buttons makes menus ignore them)
+# ============================================================================
+
+meta:
+  version: 1
+  description: "Control map for Xbox Cloud Gaming on Android via Arduino HID gamepad"
+  verified_against: >-
+    Arduino Due (ATSAM3X8E) + arduino:sam 1.6.12, arduino-cli 1.5.1, COM6.
+    Firmware xcloudpad-due-1.0 flashed and PING/round-trip verified 2026-08-14.
+    NOTE: that verification proves the BOARD accepts commands and mutates its
+    report state. It does NOT yet prove Android renders the pad, nor that
+    xCloud reacts - confirm with a gamepad-tester app on the phone first.
+
+# ---------------------------------------------------------------------------
+# TRANSPORT PROFILES
+# Add a board = add a profile here + flash the matching sketch in firmware/.
+# ---------------------------------------------------------------------------
+transports:
+  leonardo_usb:
+    description: "Leonardo USB HID gamepad + FT232RL on the UART. VERIFIED WORKING."
+    firmware: "firmware/leonardo_gamepad"
+    ble_device_name: null
+    dpad_mode: "hat"
+    default: true
+    serial_port: "COM8"
+    # The Leonardo's single USB port goes to the PHONE - that is how it appears
+    # as a controller - so commands arrive over the hardware UART instead:
+    #     FT232RL TX  -> Leonardo RX (D0)     (TX and RX must CROSS)
+    #     FT232RL RX  -> Leonardo TX (D1)
+    #     FT232RL GND -> Leonardo GND
+    #
+    # This folder ships ONLY this transport, because it is the only one
+    # confirmed working on the phone. The Due and ESP32 variants live in
+    # ../xCloud-Android-Arduino/ - their firmware compiles and the Due even
+    # passed 8/8 HID reports on a PC, but neither was ever confirmed on Android.
+
+
+# ---------------------------------------------------------------------------
+# CONNECTION
+# The serial link from this PC to the Arduino. Auto-detection is preferred:
+# COM numbers move when you replug (the console project learned the same lesson
+# with capture-device indices silently swapping).
+# ---------------------------------------------------------------------------
+connection:
+  # COM8 is the FT232RL UART bridge - the VERIFIED WORKING command link.
+  # Set to null to auto-detect by USB ID instead.
+  serial_port: "COM8"
+  baudrate: 115200
+  # USB VID:PID pairs to look for when auto-detecting, in PRIORITY order.
+  # The FT232RL is first because it is the command link for the working setup.
+  #
+  # VERIFIED ON HARDWARE (do not "correct" these from memory - the two Due PIDs
+  # are easy to transpose, and an early draft of this file had them reversed):
+  #   0403:6001  -> FT232RL UART bridge  <-- the WORKING command link
+  #   2341:003D  -> Arduino Due PROGRAMMING port
+  #   2341:003E  -> Arduino Due NATIVE port. Enumerates as a COMPOSITE device
+  #                 (CDC + HID) once a sketch claims it. Goes to the PHONE.
+  #   2341:8036  -> Arduino Leonardo in sketch mode. Present only while the
+  #                 Leonardo is plugged into the PC; once it moves to the phone
+  #                 this disappears and COM8 is the only way to reach it.
+  #
+  #   10C4:EA60 CP2102, 1A86:7523 CH340 -> typical ESP32 dev boards
+  #   303A:1001              -> Espressif native USB (S2/S3)
+  usb_ids:
+    - "0403:6001"
+    - "2341:003D"
+    - "2A03:003D"
+    - "10C4:EA60"
+    - "1A86:7523"
+    - "303A:1001"
+    - "2341:8036"
+    - "2A03:8036"
+
+  boot_wait: 1.5                  # board resets when the port opens; wait it out
+
+  command_timeout: 2.0            # per-command reply timeout
+  ping_retries: 5
+
+# ---------------------------------------------------------------------------
+# BUTTONS (digital: 1 = press, 0 = release)
+#   hid: name the firmware understands (see BTN_TABLE in the sketch)
+# ---------------------------------------------------------------------------
+buttons:
+  # ---- Face buttons -------------------------------------------------------
+  a:
+    hid: "a"
+    aliases: ["cross", "confirm", "select_item"]
+    description: "A - confirm/select"
+  b:
+    hid: "b"
+    aliases: ["circle", "cancel", "back_action"]
+    description: "B - cancel/back"
+  x:
+    hid: "x"
+    aliases: ["square"]
+    description: "X button"
+  y:
+    hid: "y"
+    aliases: ["triangle"]
+    description: "Y button"
+
+  # ---- D-pad --------------------------------------------------------------
+  # These are hat directions, not buttons. pad_link.py routes them to `H`.
+  up:
+    hid: "dpad_up"
+    aliases: ["u", "dpad_up"]
+    hat: 0
+    description: "D-pad up (HID hat)"
+  right:
+    hid: "dpad_right"
+    aliases: ["r", "dpad_right"]
+    hat: 90
+    description: "D-pad right (HID hat)"
+  down:
+    hid: "dpad_down"
+    aliases: ["d", "dpad_down"]
+    hat: 180
+    description: "D-pad down (HID hat)"
+  left:
+    hid: "dpad_left"
+    aliases: ["l", "dpad_left"]
+    hat: 270
+    description: "D-pad left (HID hat)"
+
+  # ---- System buttons -----------------------------------------------------
+  menu:
+    hid: "start"
+    aliases: ["start", "hamburger", "pause"]
+    description: "Menu button (3 lines) = HID Start"
+  view:
+    hid: "select"
+    aliases: ["select", "back", "windows"]
+    description: "View button (2 squares) = HID Select/Back"
+  guide:
+    hid: "home"
+    aliases: ["xbox", "home", "dashboard"]
+    description: >-
+      Xbox/Guide button. On xCloud this opens the in-stream overlay. Mapped to
+      the HID Home/Consumer control. NOT the GIMX 'PS' hack - Android needs a
+      real Home usage. Some Android builds intercept Home for the launcher,
+      so treat this one as UNVERIFIED on your device.
+
+  # ---- Shoulder buttons ---------------------------------------------------
+  lb:
+    hid: "lb"
+    aliases: ["l1", "left_bumper"]
+    description: "Left bumper"
+  rb:
+    hid: "rb"
+    aliases: ["r1", "right_bumper"]
+    description: "Right bumper"
+
+  # ---- Stick clicks -------------------------------------------------------
+  ls:
+    hid: "ls"
+    aliases: ["l3", "left_stick_click", "lsb"]
+    description: "Left stick click"
+  rs:
+    hid: "rs"
+    aliases: ["r3", "right_stick_click", "rsb"]
+    description: "Right stick click"
+
+# ---------------------------------------------------------------------------
+# TRIGGERS (analog 0..255)
+# ---------------------------------------------------------------------------
+triggers:
+  lt:
+    hid: "lt"
+    aliases: ["l2", "left_trigger"]
+    min: 0
+    max: 255
+    default_press: 255
+    description: "Left trigger (analog)"
+  rt:
+    hid: "rt"
+    aliases: ["r2", "right_trigger"]
+    min: 0
+    max: 255
+    default_press: 255
+    description: "Right trigger (analog)"
+
+# ---------------------------------------------------------------------------
+# STICKS (analog axes, -128..127)
+# NOTE the Y convention: -128 = UP. This matches the console config, and the
+# firmware flips it if the HID descriptor disagrees, so scripts stay portable.
+# ---------------------------------------------------------------------------
+sticks:
+  left_stick:
+    x_axis: "lx"
+    y_axis: "ly"
+    min: -128
+    max: 127
+    center: 0
+    deadzone: 10
+    directions:
+      left:  { axis: "lx", value: -128 }
+      right: { axis: "lx", value: 127 }
+      up:    { axis: "ly", value: -128 }
+      down:  { axis: "ly", value: 127 }
+    description: "Left analog stick - movement"
+
+  right_stick:
+    x_axis: "rx"
+    y_axis: "ry"
+    min: -128
+    max: 127
+    center: 0
+    deadzone: 10
+    directions:
+      left:  { axis: "rx", value: -128 }
+      right: { axis: "rx", value: 127 }
+      up:    { axis: "ry", value: -128 }
+      down:  { axis: "ry", value: 127 }
+    description: "Right analog stick - camera/look"
+
+# ---------------------------------------------------------------------------
+# TIMING (seconds)
+# Values differ from the console profile because we no longer pay the ~250 ms
+# gimx.exe spawn cost per event - a press here is ~2 ms round trip. But xCloud
+# adds 60-100 ms of NETWORK latency, and its UI animates, so menu waits are
+# LONGER than on a local console.
+# ---------------------------------------------------------------------------
+timing:
+  tap_duration: 0.06
+  press_duration: 0.10
+  long_press_duration: 1.0
+  deep_press_duration: 2.0
+  gap_between_presses: 0.12
+  gap_between_sequences: 0.4
+
+  menu_transition_wait: 1.2       # cloud UI animates slower than local
+  screen_load_wait: 3.0
+  stream_start_wait: 25.0         # "starting your game" -> playable
+  app_launch_wait: 8.0            # Game Pass app cold start
+
+  link_settle: 1.5                # after opening the serial port
+  reconnect_delay: 1.0
+  ble_connect_timeout: 30.0
+
+# ---------------------------------------------------------------------------
+# SPECIAL / COMPOUND ACTIONS
+# ---------------------------------------------------------------------------
+special_actions:
+  wake_controller:
+    description: "One harmless press so xCloud stops showing 'connect a controller'"
+    sequence:
+      - { button: "a", duration: 0.08 }
+    verified: false
+
+  stream_overlay:
+    description: "Open the xCloud in-stream overlay (Guide)"
+    sequence:
+      - { button: "guide", duration: 0.1 }
+    verified: false
+
+  leave_stream:
+    description: "Guide -> confirm -> quit the stream (best guess)"
+    sequence:
+      - { button: "guide", duration: 0.1 }
+      - { wait: 1.2 }
+      - { button: "a" }
+    verified: false
+
+# ---------------------------------------------------------------------------
+# MACROS
+# Step keys: button / times / interval / duration / wait / trigger+value /
+#            stick+direction|x|y   - identical to controls.yaml
+# ---------------------------------------------------------------------------
+macros:
+  confirm:
+    description: "Confirm current selection"
+    steps:
+      - { button: "a" }
+
+  go_back:
+    description: "Back out one level"
+    steps:
+      - { button: "b" }
+
+  nav_test:
+    description: "Visible D-pad pattern to prove input reaches xCloud"
+    steps:
+      - { button: "right", times: 2, interval: 0.8 }
+      - { wait: 0.8 }
+      - { button: "left",  times: 2, interval: 0.8 }
+      - { wait: 0.8 }
+      - { button: "down" }
+      - { wait: 0.8 }
+      - { button: "up" }
+
+  hid_selftest:
+    description: "Exercise every control once - watch it in Gamepad Tester"
+    steps:
+      - { button: "a" }
+      - { button: "b" }
+      - { button: "x" }
+      - { button: "y" }
+      - { button: "lb" }
+      - { button: "rb" }
+      - { button: "menu" }
+      - { button: "view" }
+      - { button: "up" }
+      - { button: "right" }
+      - { button: "down" }
+      - { button: "left" }
+      - { trigger: "lt", value: 255, duration: 0.3 }
+      - { trigger: "rt", value: 255, duration: 0.3 }
+      - { stick: "left_stick",  direction: "right", duration: 0.4 }
+      - { stick: "left_stick",  direction: "left",  duration: 0.4 }
+      - { stick: "right_stick", direction: "up",    duration: 0.4 }
+      - { stick: "right_stick", direction: "down",  duration: 0.4 }
+
+# ---------------------------------------------------------------------------
+# NOTES / KNOWN LIMITATIONS
+# ---------------------------------------------------------------------------
+notes:
+  - "No authentication step exists on Android - if the pad is paired and sends a
+     report, xCloud accepts it. This is strictly simpler than the console path."
+  - "A firmware 'OK' proves the HID report was queued, NOT that xCloud reacted.
+     Verify with Gamepad Tester first, then with a screen capture of the phone."
+  - "The D-pad MUST be a hat, not four buttons: Android UI navigation ignores
+     generic buttons in many titles."
+  - "`guide` is unverified: some Android builds swallow the HID Home usage
+     before the app sees it."
+  - "xCloud adds 60-100 ms network latency on top of BLE's ~10 ms. Frame-exact
+     input is not achievable; menu automation is."

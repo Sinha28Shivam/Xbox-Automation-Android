@@ -1,0 +1,45 @@
+# ===========================================================================
+#  Scenario: does xCloud see the controller at all?
+#
+#  There is NO required schema. The ScenarioAgent reads whatever you write - a
+#  paragraph of prose works just as well as this. Structure is offered here
+#  because it helps YOU be precise, not because the code demands it.
+#
+#  This is the right first scenario for any new rig: it is the smallest question
+#  whose answer is unambiguous, and every richer test depends on it being yes.
+# ===========================================================================
+
+title: "xCloud detects the USB HID gamepad"
+
+intent: >-
+  Confirm that xCloud, running as a PWA in a mobile browser, recognises the
+  Arduino-based USB HID gamepad and responds to its input. This is the
+  foundation for every other controller test: if this fails, nothing further
+  can be concluded about navigation, streaming or gameplay.
+
+preconditions:
+  - "The Leonardo is connected to the phone via USB-OTG and its ON LED is lit"
+  - "The xbox.com/play page is open in a browser on the phone, signed in"
+  - "The phone screen is unlocked and awake"
+
+acceptance_criteria:
+  - "xCloud no longer shows a 'connect a controller' style prompt after the
+     first gamepad input is sent"
+  - "A D-pad input visibly moves the focus or highlight on screen"
+  - "The board reports that a USB host has enumerated the pad"
+
+# Written down so a failure is not misfiled as an xCloud bug. Each of these has
+# a different owner and a different fix.
+out_of_scope:
+  - "Audio output"
+  - "Stream image quality or bitrate"
+  - "Input latency measurement - the network round trip dominates and this rig
+     cannot measure it meaningfully"
+  - "Whether specific game titles map A/B correctly, which is a per-title
+     layout question, not a detection question"
+
+notes: >-
+  The FIRST input is normally swallowed by xCloud dismissing its own
+  'connect a controller' prompt, so a plan that presses once and expects
+  navigation will look like a failure when it is actually correct behaviour.
+  Send a harmless press first, then test navigation.
