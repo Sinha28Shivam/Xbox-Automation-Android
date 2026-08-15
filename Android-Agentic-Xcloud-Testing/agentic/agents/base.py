@@ -89,15 +89,27 @@ class Agent:
             self.llm_used = True
             return result
         except LLMUnavailable as exc:
-            self.notes.append(
-                f"{self.name}: no LLM reasoning available ({exc}); "
-                f"fell back to deterministic logic")
+            self._record_llm_failure(str(exc))
             return default
         except Exception as exc:                     # noqa: BLE001
-            self.notes.append(
-                f"{self.name}: LLM call failed ({type(exc).__name__}: {exc}); "
-                f"fell back to deterministic logic")
+            self._record_llm_failure(f"{type(exc).__name__}: {exc}")
             return default
+
+    def _record_llm_failure(self, detail: str) -> None:
+        """Make a degraded run VISIBLE, not just quiet.
+
+        Learned the hard way: a wrong model id in the config produced a full run
+        of mechanical fallbacks whose report said only "no LLM was available".
+        That is technically true and practically useless - the actual cause was a
+        404 naming the bad model, and it never reached the reader.
+
+        So the reason is pushed onto the factory's shared error list, which the
+        report and `--capabilities` both print.
+        """
+        note = f"{self.name}: fell back to deterministic logic - {detail}"
+        self.notes.append(note)
+        if detail not in self.llm.errors:
+            self.llm.errors.append(detail)
 
     def system_prompt(self, role: str) -> str:
         """SYSTEM_CONTEXT + this agent's specific job."""

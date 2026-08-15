@@ -1,0 +1,65 @@
+# ===========================================================================
+#  CASE: launching a game into a live stream.
+#
+#  The most demanding case here, and the most likely to be INCONCLUSIVE rather
+#  than pass or fail - which is the correct outcome when the evidence is thin,
+#  not a defect in the harness.
+#
+#  Why it is hard, stated up front so a weak result is not mistaken for a bug:
+#    * A stream takes 20-30s to become playable. Anything that waits less than
+#      that will report a failure that is really impatience.
+#    * The screen is decoded VIDEO. It changes constantly, so "the screen
+#      changed" stops being evidence that our input did anything - the frame
+#      diff, so reliable in menus, is nearly useless once a stream is running.
+#    * Which game is available depends on the account and on Game Pass, so the
+#      case must NOT name a title. It says "whatever is focused".
+# ===========================================================================
+
+id: stream_launch
+title: "A game can be launched into a playable stream with the controller"
+tags: ["regression", "slow", "stream"]
+
+intent: >-
+  From the xCloud library, use only the gamepad to launch whatever game is
+  currently focused, and confirm the stream reaches a playable state rather
+  than stalling on a loading screen or returning an error.
+
+preconditions:
+  - "xCloud is open, signed in, and showing a library or home screen"
+  - "The controller is already proven working - run controller_detected first,
+     because a failure here would otherwise be ambiguous"
+  - "The account has at least one playable title"
+
+acceptance_criteria:
+  - "Pressing A on a focused game tile opens that game's detail page or begins
+     launching it"
+  - "A loading or 'starting your game' state appears, confirming the request
+     was accepted by the service"
+  - "Within the configured stream_start_wait, the loading state is replaced by
+     actual game video"
+  - "No error message, queue notice, or 'unable to start' dialog is shown"
+
+out_of_scope:
+  - "Which specific game launches - this depends on the account, so naming one
+     would make the case fail for reasons unrelated to streaming"
+  - "Video quality, resolution or bitrate"
+  - "Input latency inside the game, which this rig cannot measure meaningfully"
+  - "Whether gameplay controls behave correctly once streaming - that needs a
+     known in-game state this case does not establish"
+
+notes: >-
+  Use the `stream_start_wait` timing from ../config/controls.yaml (25s) rather
+  than a guess. Waiting too little is the number one cause of a false failure
+  in this case.
+
+  IMPORTANT for judging: once video is playing, frame-to-frame change is
+  constant and proves nothing about our input. Judge this case on WHAT IS
+  VISIBLE - a loading screen, an error, or game content - not on whether pixels
+  moved.
+
+  A queue ("you are number N in line") is neither pass nor fail. It means the
+  service accepted the request and is rationing capacity, so report it as
+  inconclusive with the queue position quoted.
+
+  Leave the stream cleanly at the end if possible, so the next case does not
+  start inside a running game.

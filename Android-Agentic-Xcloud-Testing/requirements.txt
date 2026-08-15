@@ -29,11 +29,11 @@ pydantic>=2.6
 # Install ONLY the one you use. The provider is resolved at RUNTIME from
 # config/agentic.yaml (or env vars), so nothing here is hardcoded in code.
 #
-# openai / azure-openai
-langchain-openai>=0.2.0
+# anthropic - the active profile in config/agentic.yaml
+langchain-anthropic>=0.2.0
 #
-# anthropic
-# langchain-anthropic>=0.2.0
+# openai / azure-openai
+# langchain-openai>=0.2.0
 #
 # google gemini
 # langchain-google-genai>=2.0.0

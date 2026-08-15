@@ -1,0 +1,61 @@
+# ===========================================================================
+#  suites.yaml - named groups of test cases.
+#
+#      python main.py --suite smoke
+#      python main.py --list
+#
+#  A suite is ONLY an ordered list of case files. It holds no test logic, so
+#  adding one never means touching Python.
+#
+#  ORDER MATTERS, and not just cosmetically. Cases run top to bottom and the
+#  first failure tells you the most: if `controller_detected` fails there is no
+#  point running `navigate_library`, because every later failure would be the
+#  same fault reported three times. Put the cheapest, most fundamental check
+#  first and let it fail fast.
+# ===========================================================================
+
+meta:
+  version: 1
+  description: "Test suites for xCloud on Android via the Arduino HID pad"
+
+suites:
+
+  smoke:
+    description: >-
+      The 60-second answer to "is anything working at all?". Run this before
+      any longer suite, and after any change to wiring or firmware.
+    stop_on_failure: true      # a broken input path makes later cases noise
+    cases:
+      - cases/controller_detected.yaml
+
+  controller:
+    description: >-
+      Everything about the controller itself: detection, every control, and
+      navigation. The suite to run after re-flashing or re-wiring.
+    stop_on_failure: true
+    cases:
+      - cases/controller_detected.yaml
+      - cases/every_control_responds.yaml
+      - cases/navigate_library.md
+
+  regression:
+    description: >-
+      The full sweep. Slow, and the one to run before saying "it still works".
+      stop_on_failure is FALSE here on purpose: for a regression run you want
+      the complete picture of what broke, not just the first thing.
+    stop_on_failure: false
+    cases:
+      - cases/controller_detected.yaml
+      - cases/every_control_responds.yaml
+      - cases/navigate_library.md
+      - cases/pwa_loads.yaml
+      - cases/stream_launch.yaml
+
+  diagnostics:
+    description: >-
+      Run when something is wrong and you want the rig itself characterised
+      rather than the app tested. These cases are written to FAIL INFORMATIVELY.
+    stop_on_failure: false
+    cases:
+      - cases/pwa_loads.yaml
+      - cases/controller_detected.yaml

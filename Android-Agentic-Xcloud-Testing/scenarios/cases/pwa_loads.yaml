@@ -1,0 +1,46 @@
+# ===========================================================================
+#  CASE: the xCloud PWA actually loads.
+#
+#  The most fundamental case, and the one worth running when a controller test
+#  fails for reasons you do not understand. It sends NO gamepad input at all,
+#  which is exactly what makes it useful: it separates "the page is broken"
+#  from "the controller is broken". Those have completely different owners.
+#
+#  If this fails, every controller case will also fail, and their root-cause
+#  analyses will be misleading - there was nothing on screen to react.
+# ===========================================================================
+
+id: pwa_loads
+title: "The xCloud PWA loads in a browser"
+tags: ["smoke", "diagnostics", "no-input"]
+
+intent: >-
+  Open https://www.xbox.com/play and confirm the page actually reaches a usable
+  xCloud UI. This case deliberately sends no controller input, so a failure here
+  is unambiguously about the page, the network or the sign-in state - never
+  about the HID path.
+
+preconditions:
+  - "The phone has a working internet connection"
+  - "A browser is installed and adb can send it an intent"
+
+acceptance_criteria:
+  - "A browser comes to the foreground after the URL intent is sent"
+  - "The page finishes loading rather than showing a spinner or an error page"
+  - "Content recognisably belonging to Xbox Cloud Gaming is visible, such as
+     game tiles, an Xbox logo, or a sign-in prompt"
+  - "No app-chooser dialog is left on screen, since that would swallow the
+     gamepad input any later test depends on"
+
+out_of_scope:
+  - "Whether the controller works - that is controller_detected.yaml"
+  - "Page load time, which is dominated by network conditions we do not control"
+
+notes: >-
+  A sign-in prompt is a legitimate PASS for this case: the page loaded. It is a
+  BLOCKER for every other case though, so say so plainly rather than quietly
+  treating it as normal.
+
+  Being signed out is the single most common reason a whole suite goes red at
+  once, and it looks exactly like a controller fault if you are not watching
+  the screen.

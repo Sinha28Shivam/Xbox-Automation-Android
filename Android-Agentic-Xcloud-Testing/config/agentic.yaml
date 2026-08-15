@@ -23,7 +23,10 @@ meta:
 # api_key_env names the ENV VAR - never put a key in this file.
 # ---------------------------------------------------------------------------
 llm:
-  active: "openai"
+  # Set to match the key present in .env (ANTHROPIC_API_KEY). Change this one
+  # line to switch every agent to another provider, or override per run with
+  # `--llm local` / `--llm openai`.
+  active: "anthropic"
 
   profiles:
     openai:
@@ -40,9 +43,22 @@ llm:
       api_key_env: "OPENAI_API_KEY"
       supports_vision: true
 
+    # Model IDs are account-specific and they DO change. If a run reports
+    # `404 not_found_error: model: ...`, list what your key can actually see:
+    #     python -c "import anthropic;[print(m.id) for m in anthropic.Anthropic().models.list().data]"
+    # and put a real id here. Nothing in the code hardcodes a model name.
     anthropic:
       provider: "anthropic"
-      model: "claude-sonnet-4-20250514"
+      model: "claude-sonnet-4-5-20250929"
+      temperature: 0.0
+      api_key_env: "ANTHROPIC_API_KEY"
+      supports_vision: true
+
+    anthropic_fast:
+      # Cheaper, for the high-frequency per-step judgements where the question
+      # is narrow ("did the screen change as expected?") rather than open-ended.
+      provider: "anthropic"
+      model: "claude-haiku-4-5-20251001"
       temperature: 0.0
       api_key_env: "ANTHROPIC_API_KEY"
       supports_vision: true
@@ -62,10 +78,15 @@ llm:
       supports_vision: false
 
   # Per-agent overrides. Omit an agent and it uses `active`.
+  #
+  # The split is about where reasoning actually pays for itself. RCA gets the
+  # strongest model because attributing a failure to the wrong LAYER sends a
+  # human down the wrong path for an hour. The executor's per-step judgement is
+  # narrow and runs on every step, so it takes the cheap one.
   agent_profiles:
-    planner: "openai"
-    rca: "openai_strong"           # root cause is where reasoning pays off
-    observer: "openai"             # must be a vision profile if vision.enabled
+    executor: "anthropic_fast"
+    observer: "anthropic"          # must be a vision profile if vision.enabled
+    rca: "anthropic"               # root cause is where reasoning pays off
 
 # ---------------------------------------------------------------------------
 # HARDWARE / TRANSPORT

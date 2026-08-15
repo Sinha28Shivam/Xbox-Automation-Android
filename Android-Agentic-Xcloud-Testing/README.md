@@ -5,7 +5,8 @@ phone's screen, decide whether it really happened, diagnose it when it did not,
 and write the report.
 
 ```bat
-5-AGENTIC.bat "open xCloud and check the controller is detected"
+python main.py --suite smoke
+python main.py "open xCloud and check the controller is detected"
 ```
 
 Built on top of the working hardware in the folder above: PC → FT232RL → Arduino
@@ -71,13 +72,19 @@ host for the Leonardo, so Wi-Fi is the way.
 
 ## Use
 
+`main.py` is the entry point. `5-AGENTIC.bat` is the same thing for
+double-clickers — it just fixes the working directory first.
+
 ```bat
-5-AGENTIC.bat --check                    :: is the rig ready? sends no input
-5-AGENTIC.bat --capabilities             :: what can this run actually do?
-5-AGENTIC.bat "your scenario in words"
-5-AGENTIC.bat --scenario scenarios\controller_detected.yaml
-5-AGENTIC.bat --scenario scenarios\ --all
-5-AGENTIC.bat --dry-run "..."            :: plan and reason, touch no hardware
+python main.py --list                    :: every suite and case
+python main.py --check                   :: is the rig ready? sends no input
+python main.py --capabilities            :: what can this run actually do?
+
+python main.py --suite smoke             :: a named group, in a chosen order
+python main.py --case pwa_loads          :: one case
+python main.py --tag slow                :: everything with a tag
+python main.py "your scenario in words"  :: no file needed
+python main.py --dry-run --suite smoke   :: plan and reason, touch no hardware
 ```
 
 Start with `--check`. It answers three questions that are easy to conflate and
@@ -99,6 +106,40 @@ enumerated.
 
 `inconclusive` is deliberately **not** `0`. A run that proved nothing must not be
 able to turn a pipeline green.
+
+---
+
+## Layout
+
+```
+main.py                  the entry point - start reading here
+config/agentic.yaml      HOW the agents behave (models, timings, safety)
+scenarios/
+  suites.yaml            named groups of cases, in a deliberate ORDER
+  cases/                 one file per test case - YAML, markdown, anything
+agentic/
+  cli.py                 flags -> config overrides, exit codes
+  graph.py               the LangGraph state machine
+  agents/                the seven specialists
+  tools/                 pad (input), android (adb), vision (eyes)
+  suites.py              resolves --suite / --case / --tag
+  schemas.py             the pydantic contracts between agents
+reports/                 JSON + Markdown + HTML per run   (gitignored)
+artifacts/<run-id>/      screenshots per step             (gitignored)
+```
+
+### Suites and cases
+
+A **case** is one scenario file. A **suite** is an ordered list of cases.
+
+Order is not cosmetic. `smoke` runs `controller_detected` first and sets
+`stop_on_failure: true`, because if input never reaches the page then every
+later case fails for that same reason — five confusing failures instead of one
+clear finding. `regression` sets it to `false`, because there you want the whole
+picture.
+
+Adding a case is dropping a file in `scenarios/cases/`. Adding a suite is four
+lines of YAML. Neither touches Python.
 
 ---
 
