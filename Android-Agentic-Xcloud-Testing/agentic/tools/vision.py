@@ -263,6 +263,18 @@ class VisionTool:
             obs.screen_description = described
             sensors.append("vision_llm")
 
+        # -- UI state extraction ------------------------------------------
+        combined = f"{text}\n{described}".lower()
+        if "minecraft" in combined or "dungeons" in combined:
+            obs.target_visible = True
+        if any(term in combined for term in ("play now", "play\n", "starting your game", "details")):
+            if "minecraft" in combined or "dungeons" in combined:
+                obs.detail_page_open = True
+        if any(term in combined for term in ("starting your game", "launching", "connecting to stream", "game stream")):
+            obs.stream_active = True
+        if any(term in combined for term in ("main menu", "press any button", "marketplace", "select hero", "online game", "offline game", "mission select")):
+            obs.main_menu_visible = True
+
         if self.android and self.android.status.adb_available:
             obs.focused_window = self.android.focused_window()
             if obs.focused_window:

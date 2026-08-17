@@ -148,7 +148,11 @@ class ExecutorAgent(Agent):
             log.act(f"intent: {step.intent}")
         if step.expectation:
             log.act(f"expects: {step.expectation}")
-        log.act(f"settle plan: {profile.describe()} [{profile.reason}]")
+        # Enforce ONE input per navigation tick (closed-loop rule: look -> press once -> look)
+        if step.kind == ActionKind.PRESS and step.target and step.target.lower() in ("up", "down", "left", "right"):
+            if step.times and step.times > 1:
+                log.warn(f"Capping {step.target} times from {step.times} to 1 (enforcing single-step closed-loop navigation)", indent=1)
+                step.times = 1
 
         # -- 1: act --------------------------------------------------------
         if self.s.get("logs.logcat_enabled", True) and self.ctx.android:
@@ -213,6 +217,7 @@ class ExecutorAgent(Agent):
                   or (not result.hardware_ok and not step.optional))
         needs_rca = bool(failed and not step.optional and mode != "plan")
 
+        next_cursor = cursor + 1
         adaptations: list[str] = []
         if failed and step.optional:
             # An optional step failing is information, not a fault: the wake-up
@@ -230,12 +235,28 @@ class ExecutorAgent(Agent):
                     f"a single late observation would have missed it.")
             adaptations.append(note)
             log.warn(note, indent=1)
+
+        # Closed-loop milestone awareness
+        if observation is not None:
+            if observation.main_menu_visible:
+                log.ok("IN-GAME MAIN MENU DETECTED: target milestone complete!", indent=1)
+            elif observation.detail_page_open:
+                # Detail page already reached: jump ahead past any remaining search/home D-pad moves
+                for idx in range(cursor + 1, len(plan.steps)):
+                    future_step = plan.steps[idx]
+                    if future_step.target in ("a", "confirm") and any(
+                            k in future_step.intent.lower() for k in ("play", "launch", "stream")):
+                        if idx > next_cursor:
+                            log.ok(f"DETAIL PAGE OPEN: jumping directly to {future_step.id} ({future_step.intent})", indent=1)
+                            next_cursor = idx
+                        break
+
         if needs_rca:
             log.warn(f"routing to RCA after {step.id}", indent=1)
 
         return {
             "step_results": [result],
-            "cursor": cursor + 1,
+            "cursor": next_cursor,
             "needs_rca": needs_rca,
             "adaptations": adaptations,
             "agent_trace": [self.trace(

@@ -42,9 +42,10 @@ Hard rules:
    (for example a wake-up press), say so in `intent` and leave `expectation`
    empty rather than inventing one.
 3. Link steps to the criteria they support via `criterion_ids`.
-4. Start by establishing a known state. On this rig the FIRST input is usually
-   consumed by xCloud clearing its "connect a controller" prompt, so plan a
-   harmless press and mark it `optional: true`.
+4. Start by establishing a known state and verifying mobile signal acceptance:
+   a. After PWA launch & screen stabilization, probe with PRESS target="guide" times=3 (optional: true) to trigger the Guide screen.
+   b. Dismiss with PRESS target="b" (optional: true) to return cleanly to the menu screen.
+   c. On this rig the first input is also consumed by clearing the "connect a controller" prompt.
 5. Respect the latency. Use WAIT steps generously around anything that starts a
    stream, and prefer `interval` over rapid repeats: a cloud UI drops fast input.
 6. Use kind=LAUNCH_PWA to open xCloud. It sends a VIEW intent for a URL, because
@@ -350,6 +351,16 @@ class PlannerAgent(Agent):
                         or "minecraft" in scenario.intent.lower())
 
         if caps.can_send_input:
+            # After PWA launch & stabilization: press Guide 3 times to wake controller & verify signal, then dismiss with B
+            guide_btn = next((b for b in ("guide", "home") if b in caps.buttons), None)
+            if guide_btn and "b" in caps.buttons:
+                add(kind=ActionKind.PRESS, target=guide_btn, times=3, interval=0.35, optional=True,
+                    intent="post-launch signal handshake: press Guide 3 times after PWA stabilizes to wake controller and open Guide screen",
+                    expectation="Xbox Guide overlay or side panel appears on screen")
+                add(kind=ActionKind.PRESS, target="b", optional=True,
+                    intent="dismiss Guide overlay with B button to return back to menu screen",
+                    expectation="screen returns to main xCloud menu")
+
             if is_minecraft:
                 # 1. Wake up controller / clear "connect a controller" notice
                 add(kind=ActionKind.PRESS, target="a", optional=True,

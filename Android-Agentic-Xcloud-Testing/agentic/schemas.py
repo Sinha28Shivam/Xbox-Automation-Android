@@ -218,6 +218,8 @@ class EnvironmentReport(BaseModel):
     android: AndroidStatus = Field(default_factory=AndroidStatus)
     capabilities: Capabilities = Field(default_factory=Capabilities)
     ready: bool = False
+    guide_signal_verified: bool | None = None
+    guide_verification_notes: str = ""
     blocking_reasons: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     # The LLM's plain-English read of the above, including the fix to try.
@@ -283,6 +285,13 @@ class Observation(BaseModel):
     change_ratio: float | None = None
     screen_changed: bool | None = None
     focused_window: str | None = None
+    focused_tile: str | None = None      # name/text of currently highlighted tile
+    visible_tiles: list[str] = Field(default_factory=list)
+    target_visible: bool = False         # target game tile is visible on screen
+    target_focused: bool = False         # target game tile is currently focused
+    detail_page_open: bool = False       # game detail page ("Play" / "Play now") is open
+    stream_active: bool = False          # live game stream video is active
+    main_menu_visible: bool = False      # in-game main menu reached
     pad_state: str | None = None         # the board's own view of what it holds
     log_excerpt: str = ""
     notes: list[str] = Field(default_factory=list)
