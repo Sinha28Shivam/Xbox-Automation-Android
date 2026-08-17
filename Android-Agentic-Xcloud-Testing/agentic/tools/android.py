@@ -31,8 +31,10 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from ..logbook import log
 from ..schemas import AndroidStatus
 from ..settings import Settings
+
 
 
 class AndroidTool:
@@ -47,10 +49,19 @@ class AndroidTool:
 
     # -- process plumbing --------------------------------------------------
     def _run(self, args: list[str], timeout: float = 20.0,
-             binary: bool = False) -> tuple[bool, str | bytes]:
-        """Run one adb command. Returns (ok, stdout-or-error-text)."""
+             binary: bool = False,
+             merge_stderr: bool = False) -> tuple[bool, str | bytes]:
+        """Run one adb command. Returns (ok, stdout-or-error-text).
+
+        `merge_stderr` matters more than it looks. An on-device failure -
+        `input text` hitting a SecurityException, for instance - writes its stack
+        trace to STDERR and still exits ZERO. Callers that only read stdout
+        therefore see empty output, a zero exit code, and conclude success. See
+        `shell_checked`, which exists entirely to catch that.
+        """
         if not self.adb:
             return False, "adb is not available"
+
         cmd = [self.adb]
         if self.serial:
             # Always target explicitly. With two devices attached, an untargeted
@@ -73,11 +84,63 @@ class AndroidTool:
             return False, self.last_error
         if binary:
             return True, proc.stdout
-        return True, proc.stdout.decode("utf-8", "replace")
+
+        text = proc.stdout.decode("utf-8", "replace")
+        if merge_stderr:
+            err = proc.stderr.decode("utf-8", "replace")
+            if err.strip():
+                text = f"{text}\n{err}" if text.strip() else err
+        return True, text
+
 
     def shell(self, command: str, timeout: float = 20.0) -> tuple[bool, str]:
         ok, out = self._run(["shell", command], timeout)
         return ok, out if isinstance(out, str) else ""
+
+    def shell_checked(self, command: str,
+                      timeout: float = 20.0) -> tuple[bool, str]:
+        """Like `shell`, but treats an on-device Java exception as FAILURE.
+
+        WHY THIS EXISTS - a real silent failure, found on this rig
+        ---------------------------------------------------------
+        `adb shell input text ...` on this Xiaomi/MIUI phone prints:
+
+            Exception occurred while executing 'text':
+            java.lang.SecurityException: Injecting input events requires the
+            caller ... to have the INJECT_EVENTS permission.
+
+        ...and then EXITS ZERO. The `adb` process succeeded - it delivered the
+        command and the shell ran - so `_run` sees returncode 0 and reports ok.
+        The failure happened INSIDE the device, and the only trace of it is text
+        on stderr.
+
+        That is the project's own headline trap wearing different clothes: a
+        layer reported success for something that did not happen, and every
+        layer above it believed the report. `input_text` returned
+        "injected text 'minecraft dungeons' via adb", the step was marked
+        hardware_ok, and the search field stayed empty.
+
+        So any command whose real outcome lives in its OUTPUT rather than its
+        exit code must be read, not trusted. `_run` merges stderr into the
+        returned text for exactly this reason.
+        """
+        ok, out = self._run(["shell", command], timeout, merge_stderr=True)
+        text = out if isinstance(out, str) else ""
+        if not ok:
+            return False, text
+
+        # The device-side failure signatures. Checked as substrings because the
+        # surrounding stack trace changes between Android versions.
+        for marker in ("SecurityException", "Exception occurred while executing",
+                       "Permission denial", "java.lang.IllegalStateException"):
+            if marker in text:
+                first = next((l.strip() for l in text.splitlines()
+                              if marker in l), marker)
+                self.last_error = first
+                return False, (f"the command ran but FAILED on the device: "
+                               f"{first}")
+        return True, text
+
 
     def shell_guarded(self, command: str) -> tuple[bool, str]:
         """For commands an LLM chose. Prefix-allowlisted, off by default.
@@ -237,21 +300,36 @@ class AndroidTool:
 
     def screencap(self, dest: Path) -> tuple[bool, str]:
         """PNG screenshot. `exec-out` avoids the CRLF mangling that makes
-        `shell screencap -p` produce a corrupt file on Windows."""
+        `shell screencap -p` produce a corrupt file on Windows.
+
+        Every failure path logs, because "no screenshot available" is the single
+        most destructive silent outcome in this project: without a frame there is
+        no frame diff, so every verdict is capped at inconclusive and the reader
+        is left unable to tell "the app did not react" from "we never looked".
+        """
         ok, data = self._run(["exec-out", "screencap", "-p"], timeout=30.0,
                              binary=True)
         if not ok or not isinstance(data, bytes) or not data:
-            return False, f"screencap failed: {self.last_error or 'empty output'}"
+            detail = f"screencap failed: {self.last_error or 'empty output'}"
+            log.error(f"NO SCREENSHOT - {detail}. Without a frame this step "
+                      f"cannot be judged from pixels at all.", indent=1)
+            return False, detail
         if not data.startswith(b"\x89PNG"):
-            return False, ("screencap did not return a PNG (the device may "
-                           "block capture on protected content - DRM-protected "
-                           "video often yields a black or refused frame)")
+            detail = ("screencap did not return a PNG (the device may "
+                      "block capture on protected content - DRM-protected "
+                      "video often yields a black or refused frame)")
+            log.error(f"NO SCREENSHOT - {detail}", indent=1)
+            return False, detail
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(data)
         except OSError as exc:
-            return False, f"cannot write {dest}: {exc}"
+            detail = f"cannot write {dest}: {exc}"
+            log.error(f"NO SCREENSHOT - {detail}", indent=1)
+            return False, detail
+        log.adb(f"screencap -> {dest.name} ({len(data) // 1024} KB)", indent=2)
         return True, str(dest)
+
 
     def logcat(self, lines: int | None = None) -> str:
         """Recent log buffer. `-d` dumps and exits, so this cannot hang."""
@@ -305,8 +383,104 @@ class AndroidTool:
             "would swallow the gamepad input that follows")
         return True, detail
 
+    # The advice printed whenever event injection is refused. Kept in one place
+    # because both `keyevent` and `input_text` fail for the identical reason and
+    # a reader hitting either needs the same three options.
+    _INJECT_DENIED_HELP = (
+        "\n\n  WHY: `adb shell input` asks the system to INJECT an input event, "
+        "which needs the INJECT_EVENTS permission. The adb shell user (uid 2000) "
+        "does not hold it on this device. Xiaomi/MIUI in particular gates this "
+        "behind a setting, and it is NOT the same switch as USB debugging."
+        "\n\n  WHAT WORKS:"
+        "\n    1. On the phone, enable Developer options -> 'USB debugging "
+        "(Security settings)' / 'Allow granting permissions and simulating "
+        "input'. On MIUI this requires being signed into a Mi account and can "
+        "take a few minutes to become available. This is the real fix."
+        "\n    2. Use an IME-based keyboard instead of event injection. "
+        "io.appium.settings is already installed here and ships AppiumIME, but "
+        "SELECTING it needs `settings put secure default_input_method`, which "
+        "needs WRITE_SECURE_SETTINGS - also denied. So it must be chosen BY HAND "
+        "on the phone first (Settings -> Languages & input -> Keyboard)."
+        "\n    3. Accept the limitation and reach the game WITHOUT typing: "
+        "navigate the library/rails with the D-pad. Slower, and it tests the "
+        "controller more honestly, since no adb is involved at all.")
+
+    def can_inject_events(self) -> tuple[bool, str]:
+        """Probe ONCE whether event injection is permitted at all.
+
+        Worth doing up front rather than discovering it mid-run: if injection is
+        denied, every `input` command will fail the same way, and a scenario that
+        depends on typing cannot start. That makes it a BLOCKED precondition, not
+        a test failure - a distinction the report has to get right.
+        """
+        # A harmless keycode. 0 is KEYCODE_UNKNOWN: it changes nothing on the
+        # device but still travels the whole injection path, so a refusal here
+        # means a refusal everywhere.
+        ok, detail = self.shell_checked("input keyevent 0", timeout=15.0)
+        if ok:
+            return True, "adb can inject input events"
+        return False, detail
+
     def keyevent(self, key: str) -> tuple[bool, str]:
-        """A phone key (BACK, HOME, WAKEUP). Distinct from GAMEPAD input, which
-        must go through the Arduino - injected key events are not HID reports
-        and prove nothing about the controller path."""
-        return self.shell(f"input keyevent {key}", timeout=15.0)
+        """A phone key (BACK, HOME, WAKEUP, ENTER). Distinct from GAMEPAD input,
+        which must go through the Arduino - injected key events are not HID
+        reports and prove nothing about the controller path.
+
+        Uses `shell_checked`, because `input keyevent` exits ZERO even when the
+        device refuses it.
+        """
+        ok, out = self.shell_checked(f"input keyevent {key}", timeout=15.0)
+        if ok:
+            return True, f"injected keyevent {key} via adb"
+        log.error(f"adb keyevent {key} was REFUSED by the device: {out}",
+                  indent=1)
+        return False, out + (self._INJECT_DENIED_HELP
+                             if "INJECT_EVENTS" in out else "")
+
+    def input_text(self, text: str) -> tuple[bool, str]:
+        """Type into the focused field via adb. Returns (ok, detail).
+
+        THIS IS THE METHOD THAT WAS LYING
+        ---------------------------------
+        It previously used `shell`, which only inspects the adb process's exit
+        code. On this device `input text` prints a SecurityException and exits
+        ZERO, so the old code returned:
+
+            (True, "injected text 'minecraft dungeons' via adb")
+
+        while the search field stayed completely empty. The step was recorded as
+        hardware_ok, the plan carried on pressing DOWN and A against a page that
+        had never been searched, and the eventual failure pointed at the wrong
+        layer entirely.
+
+        Two changes fix it: `shell_checked` reads the output instead of trusting
+        the exit code, and the returned detail carries the actual remedy rather
+        than a stack trace.
+
+        Note also that this is NOT gamepad input. Even when it works it proves
+        nothing about the controller path - it is a fixture, and the report must
+        never count it as controller evidence.
+        """
+        raw = str(text)
+        # `input text` treats the argument as a single token, so a literal space
+        # would be read as a second argument and silently truncate the string.
+        # %s is the documented escape.
+        escaped = raw.replace(" ", "%s")
+
+        ok, out = self.shell_checked(f"input text '{escaped}'", timeout=15.0)
+        if ok:
+            log.adb(f"typed '{raw}' into the focused field via adb", indent=2)
+            return True, (f"injected text '{raw}' via adb. NOTE: this is adb, "
+                          f"not the gamepad, so it is not evidence about the "
+                          f"controller path")
+
+        detail = out
+        if "INJECT_EVENTS" in out:
+            detail += self._INJECT_DENIED_HELP
+        log.error(f"adb could NOT type '{raw}' - the device refused the "
+                  f"injection. The field is still empty, so any later step that "
+                  f"assumes a search was performed is testing the wrong screen.",
+                  indent=1)
+        return False, detail
+
+

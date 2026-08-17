@@ -49,11 +49,42 @@ Hard rules:
    stream, and prefer `interval` over rapid repeats: a cloud UI drops fast input.
 6. Use kind=LAUNCH_PWA to open xCloud. It sends a VIEW intent for a URL, because
    the PWA has no package to start. Only do this if launch_pwa is available.
-7. Use kind=OBSERVE for a checkpoint that sends no input.
-8. Keep the plan as short as it can be while still producing evidence. Extra
+7. A GAMEPAD CANNOT TYPE. This rig is a USB HID gamepad with buttons, triggers,
+   sticks and a hat - no keyboard usage at all. When text is needed, use
+   kind=ADB_TEXT with `target="<the text>"`, which runs `adb shell input text`.
+   Only if adb_text is available.
+
+   Be honest in the step's `intent` that this is NOT gamepad input and proves
+   nothing about the controller path. It is a fixture that gets the test to the
+   interesting part. Never claim a typed step as controller evidence.
+
+8. SEARCHING IN xCLOUD, the route measured by hand on this rig - use it rather
+   than inventing one:
+     a. PRESS y  (mark it optional - the FIRST input is normally consumed by
+        xCloud dismissing its "connect a controller" prompt, so expect NO
+        reaction and do not treat that as a failure)
+     b. PRESS y  again - this is the press that actually opens the search bar
+     c. WAIT ~1.5s for the field to take FOCUS. `input text` types into whatever
+        has focus, so typing too early goes nowhere and looks like adb is broken
+     d. ADB_TEXT the search term
+     e. PRESS down - focus is still in the text field after typing, so DOWN is
+        what moves it onto the first result. Prefer this over submitting with an
+        adb keyevent: a D-pad press is real gamepad evidence, an injected Enter
+        is not
+     f. PRESS a to open the result
+
+9. Use kind=ADB_KEYEVENT with `target="66"` (Enter) only when a form genuinely
+   must be submitted and no gamepad button will do it. Like ADB_TEXT it is not
+   controller evidence, so prefer a real press wherever one works.
+10. Use kind=OBSERVE for a checkpoint that sends no input. Put one before any
+   step whose correct action depends on what is on screen - especially before
+   dismissing a dialog, since pressing A on a dialog whose default is "Cancel"
+   backs out of whatever you were doing.
+11. Keep the plan as short as it can be while still producing evidence. Extra
    steps mean more places to go wrong and a longer window for the stream to
    change under you.
 """
+
 
 REPLAN_ROLE = ROLE + """\
 
@@ -236,6 +267,16 @@ class PlannerAgent(Agent):
                 elif not step.target:
                     step.target = str(self.s.get("android.pwa.url",
                                                  "https://www.xbox.com/play"))
+            elif step.kind == ActionKind.ADB_TEXT:
+                if not caps.can_adb_text:
+                    reason = ("typing text via adb needs adb, which is not "
+                              "available this run")
+                elif not step.target:
+                    reason = "adb_text step has no text target"
+            elif step.kind == ActionKind.ADB_KEYEVENT:
+                if not caps.can_adb_text:
+                    reason = ("sending keyevent via adb needs adb, which is not "
+                              "available this run")
             elif step.kind == ActionKind.WAIT:
                 if not step.seconds and not step.duration:
                     step.seconds = 1.0
@@ -305,7 +346,72 @@ class PlannerAgent(Agent):
         # declared way to prove input arrives.
         probe_macro = next((m for m in caps.macros if "nav" in m.lower()
                             or "test" in m.lower()), None)
+        is_minecraft = ("minecraft" in scenario.title.lower()
+                        or "minecraft" in scenario.intent.lower())
+
         if caps.can_send_input:
+            if is_minecraft:
+                # 1. Wake up controller / clear "connect a controller" notice
+                add(kind=ActionKind.PRESS, target="a", optional=True,
+                    intent="wake up the gamepad and clear xCloud's 'connect a controller' notice",
+                    expectation="")
+                # 2. Select the Minecraft Dungeons tile directly from the starting screen
+                add(kind=ActionKind.PRESS, target="a",
+                    intent="press A to select the focused Minecraft Dungeons tile on the starting screen",
+                    expectation="Minecraft Dungeons detail page opens with a Play button",
+                    criterion_ids=[c.id for c in scenario.acceptance_criteria if "reach" in c.statement.lower() or "focus" in c.statement.lower() or "detail" in c.statement.lower()])
+                # 3. Wait for detail page to render
+                add(kind=ActionKind.WAIT,
+                    seconds=caps.timing.get("screen_load_wait", 3.0),
+                    intent="wait for the Minecraft Dungeons detail page to render",
+                    observe_after=False)
+                add(kind=ActionKind.OBSERVE,
+                    intent="verify the Minecraft Dungeons detail page is open and shows Play button",
+                    expectation="the detail page shows Play / Play now without a controller warning",
+                    criterion_ids=[c.id for c in scenario.acceptance_criteria if "detail" in c.statement.lower() or "play" in c.statement.lower()])
+                # 4. Activate Play to launch the stream
+                add(kind=ActionKind.PRESS, target="a",
+                    intent="press A to activate Play and start the game stream",
+                    expectation="a loading / 'starting your game' state appears",
+                    criterion_ids=[c.id for c in scenario.acceptance_criteria if "launch" in c.statement.lower() or "stream" in c.statement.lower()])
+                add(kind=ActionKind.WAIT,
+                    seconds=caps.timing.get("app_launch_wait", 8.0) + caps.timing.get("stream_start_wait", 25.0),
+                    intent="wait for game stream to connect and stream video to appear",
+                    observe_after=False)
+                add(kind=ActionKind.OBSERVE,
+                    intent="verify live Minecraft Dungeons stream video is running",
+                    expectation="live game video is on screen",
+                    criterion_ids=[c.id for c in scenario.acceptance_criteria if "video" in c.statement.lower() or "stream" in c.statement.lower()])
+                # 5. Wait for game boot
+                add(kind=ActionKind.WAIT,
+                    seconds=caps.timing.get("game_boot_wait", 45.0),
+                    intent="wait for game boot, splash screens, and title screen",
+                    observe_after=False)
+                add(kind=ActionKind.PRESS, target="a", optional=True,
+                    intent="press A to pass 'press any button' title prompt if present",
+                    expectation="")
+                # 6. Verify main menu
+                add(kind=ActionKind.OBSERVE,
+                    intent="verify in-game main menu is reached",
+                    expectation="Minecraft Dungeons main menu is visible with options (Play, Options)",
+                    criterion_ids=[c.id for c in scenario.acceptance_criteria if "menu" in c.statement.lower()])
+                add(kind=ActionKind.RESET,
+                    intent="release all inputs so none outlive the run",
+                    expectation="", observe_after=False)
+                return TestPlan(
+                    steps=steps,
+                    strategy=(
+                        "Pure Gamepad Navigation: select Minecraft Dungeons directly from the "
+                        "starting screen with the physical gamepad, open its detail page, "
+                        "press Play with gamepad A, wait out the stream connection and game boot, "
+                        "and verify the in-game main menu. No search or ADB typing required."),
+                    assumptions=[
+                        "Minecraft Dungeons is available on the starting/home screen",
+                        "gamepad A selects the focused tile and activates Play",
+                        "all actions are executed purely via physical Leonardo USB HID gamepad",
+                    ],
+                )
+
             first = next((b for b in ("a", "menu") if b in caps.buttons), None)
             if first:
                 add(kind=ActionKind.PRESS, target=first, optional=True,
@@ -313,8 +419,11 @@ class PlannerAgent(Agent):
                            "'connect a controller' - this first input is "
                            "normally consumed by that prompt",
                     expectation="")
+
             if probe_macro:
+
                 add(kind=ActionKind.MACRO, target=probe_macro,
+
                     intent=f"run the '{probe_macro}' macro from controls.yaml "
                            f"to prove input reaches the PWA",
                     expectation="the screen changes in response to the inputs",

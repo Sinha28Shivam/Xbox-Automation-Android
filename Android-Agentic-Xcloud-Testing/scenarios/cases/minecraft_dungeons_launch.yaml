@@ -1,0 +1,85 @@
+# ===========================================================================
+#  CASE: Select Minecraft Dungeons directly from the starting screen,
+#        confirm the controller, launch it, and reach the in-game main menu.
+#
+#  PURE GAMEPAD WORKFLOW (NO ADB SEARCH / NO TYPING REQUIRED)
+#  ----------------------------------------------------------
+#  Minecraft Dungeons is directly available on the starting / home screen of
+#  xCloud (e.g. "Jump back in", "Recently Played", or the main featured rail).
+#  Therefore, no search bar, virtual keyboard navigation, or ADB text injection
+#  is required.
+#
+#  The entire test is driven 100% via the physical Leonardo USB-HID gamepad:
+#      1. LAUNCH_PWA (or navigate home)
+#      2. PRESS A (wake up controller / dismiss "connect a controller" prompt)
+#      3. PRESS A (select the Minecraft Dungeons tile from starting screen)
+#      4. OBSERVE detail page (confirm "Play" button & controller detected)
+#      5. PRESS A (activate Play to start stream)
+#      6. WAIT stream_start_wait & game_boot_wait
+#      7. PRESS A (dismiss "press any button to continue" splash screen)
+#      8. OBSERVE in-game main menu reached
+#
+#  TIMING VALUES (from config/controls.yaml)
+#  ----------------------------------------
+#      screen_load_wait   3.0s   detail view rendering
+#      app_launch_wait    8.0s   launch request accepted
+#      stream_start_wait  25.0s  "starting your game" -> live stream video
+#      game_boot_wait     45.0s  splash screens & logos -> game main menu
+# ===========================================================================
+
+id: minecraft_dungeons_launch
+title: "Minecraft Dungeons can be selected from starting screen, launched, and played to its main menu"
+tags: ["regression", "slow", "stream", "end_to_end", "titled", "gamepad_only"]
+
+intent: >-
+  Drive the full player journey using 100% physical gamepad inputs:
+  open the xCloud PWA, select the Minecraft Dungeons tile directly from the
+  starting/home screen, confirm from the game detail page that xCloud has
+  detected the controller ("Play" is active), launch the game, dismiss any
+  startup prompts, and arrive at the game's own main menu with the gamepad.
+
+preconditions:
+  - "The Leonardo is connected to the phone by USB-OTG and its ON LED is lit"
+  - "adb is reachable for visual screenshots (screencap)"
+  - "The phone is unlocked, awake, and on the xCloud starting page"
+  - "xbox.com/play is signed in to an account with Game Pass Ultimate access"
+  - "Minecraft Dungeons is visible on the starting screen (Jump back in or Featured rail)"
+
+acceptance_criteria:
+
+  # ---- reaching the game -------------------------------------------------
+  - "The xCloud PWA loads and shows the starting screen with game tiles"
+  - "Minecraft Dungeons is focused and selected using the physical gamepad"
+  - "The Minecraft Dungeons detail page opens and is identifiable by its title"
+
+  # ---- the detection signal ---------------------------------------------
+  - "The detail page shows a 'Play' or 'Play now' action without a 'connect a controller' warning"
+  - "A gamepad input visibly navigates or activates elements on screen"
+
+  # ---- launching --------------------------------------------------------
+  - "Activating Play with the A button starts the game loading stream"
+  - "Any launch consent or controller prompt is dismissed with the gamepad"
+  - "Live game video appears within stream_start_wait"
+
+  # ---- the actual goal --------------------------------------------------
+  - "The Minecraft Dungeons main menu is reached and confirmed via screenshot/OCR"
+  - "No fatal streaming error or queue notice is left on screen"
+
+out_of_scope:
+  - "Playing past the main menu"
+  - "Account licensing checks"
+  - "Text searching or typing"
+
+steps_known_to_work:
+  - "LAUNCH_PWA https://www.xbox.com/play, then WAIT screen_load_wait (5.0s)"
+  - "OBSERVE baseline screen"
+  - "PRESS a*2 (select focused Minecraft Dungeons tile from starting screen)"
+  - "WAIT screen_load_wait (3.0s)"
+  - "OBSERVE detail page, confirm Play action is present"
+  - "PRESS a (activate Play to start the stream)"
+  - "WAIT app_launch_wait (8.0s) + stream_start_wait (25.0s)"
+  - "OBSERVE live stream video"
+  - "WAIT game_boot_wait (45.0s) for game boot and splash screens"
+  - "PRESS a (dismiss 'press any button to continue' screen if present)"
+  - "OBSERVE in-game main menu (Play / Options / Marketplace)"
+  - "RESET controller"

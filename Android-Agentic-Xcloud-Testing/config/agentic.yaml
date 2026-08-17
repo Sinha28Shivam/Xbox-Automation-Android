@@ -151,9 +151,31 @@ vision:
     lang: "eng"
 
 logs:
+  # ---- TERMINAL OUTPUT (agentic/logbook.py) -------------------------------
+  # A run can take five minutes and used to print nothing until it finished, so
+  # a slow stream and a hung serial port looked identical. Every layer now
+  # narrates itself: what was dispatched, every wait and WHY, both looks at the
+  # screen with their change ratios, and each judgement as it is made.
+  #
+  #   debug   everything, including adb calls and per-frame notes
+  #   info    the default: steps, actions, waits, observations, judgements
+  #   warn    only problems
+  #   error   only failures
+  #   silent  nothing (the final report still prints)
+  level: "info"
+  # Mirror the terminal log to artifacts/<run_id>/run.log. Costs nothing and it
+  # lands beside the screenshots it describes, which is what makes a failed run
+  # re-readable a week later.
+  file_enabled: true
+  # ANSI colour on the console. null = auto-detect (off when piped or when
+  # NO_COLOR is set); the file copy is never coloured.
+  colour: null
+
+  # ---- DEVICE LOGS -------------------------------------------------------
   # Captured around each step so the RCA agent has evidence, not guesses.
   logcat_enabled: true
   logcat_lines: 400
+
   # Tag filters are hints for RELEVANCE scoring, not a hard filter - we keep
   # the raw buffer too, because the interesting line is never in the list you
   # thought of in advance.
@@ -181,12 +203,62 @@ execution:
   max_steps: 60                    # hard stop; guards against loops
   max_reactive_iterations: 12
   step_timeout_seconds: 45.0
-  # Wait after each input before observing. xCloud adds 60-100ms network
-  # latency ON TOP of its UI animations (see ../config/controls.yaml timing).
+  # DEPRECATED, kept so an old config still runs. Superseded by execution.settle
+  # below, which replaced this single number with a per-action-kind pair. It is
+  # no longer read by the executor.
   observe_delay_seconds: 1.5
   # Release every control when a run ends, however it ends. Non-negotiable:
   # a crash mid-stick otherwise leaves the character walking into a wall.
   always_reset_on_exit: true
+
+  # -------------------------------------------------------------------------
+  # SETTLE - the wait after every action, and WHEN we look at the screen.
+  #
+  # Read by agentic/timing.py, which is the only place this project sleeps.
+  #
+  # WHY THERE ARE TWO NUMBERS PER ACTION
+  # Run 20260817-105323 pressed the D-pad, the xCloud highlight moved (the frame
+  # diff measured 3.257%), the highlight settled back, and THEN the harness took
+  # its one screenshot - measured 0.074% - and reported FAIL. The evidence was
+  # photographed out of existence. Its own RCA called this a harness defect at
+  # 85% confidence and asked for a capture "immediately after nav_test, before
+  # any wait".
+  #
+  # So each input is now followed by:
+  #   glance  a short wait, then a look - catches a TRANSIENT reaction
+  #   settle  the rest of the animation, then a second look - the stable state
+  # A step counts as having reacted if EITHER frame moved.
+  #
+  # Cost: this doubles screenshots and vision-LLM calls on acting steps. Set
+  # glance_enabled: false to go back to one look per step (and to accept that a
+  # transient reaction will be missed again).
+  # -------------------------------------------------------------------------
+  settle:
+    glance_enabled: true
+    # Multiplies every glance and settle below. The one knob to turn when the
+    # network is congested or the phone is slow - no need to edit each pair.
+    scale: 1.0
+
+    # A button press: the menu highlight moves almost at once, then settles.
+    press:   { glance: 0.45, settle: 1.20 }
+    hold:    { glance: 0.45, settle: 1.50 }
+    # A macro is several inputs, so its reaction is longer and later.
+    macro:   { glance: 0.60, settle: 2.00 }
+    stick:   { glance: 0.45, settle: 1.20 }
+    trigger: { glance: 0.45, settle: 1.20 }
+    special: { glance: 0.60, settle: 2.00 }
+    # A page load over the network, not an app start. Nothing to glance at for
+    # the first second, so the glance is longer here than anywhere else.
+    pwa:     { glance: 1.50, settle: 6.00 }
+    reset:   { glance: 0.20, settle: 0.40 }
+    # OBSERVE steps ARE the observation, so they need no glance.
+    observe: { glance: 0.00, settle: 0.30 }
+    # A WAIT step already carries its own duration; adding more would be
+    # double-counting the delay the planner asked for.
+    wait:    { glance: 0.00, settle: 0.00 }
+    # Used for any action kind not named above.
+    default: { glance: 0.45, settle: 1.50 }
+
 
 # ---------------------------------------------------------------------------
 # RETRY / SELF-HEALING
@@ -206,6 +278,22 @@ report:
   formats: ["json", "markdown", "html"]
   include_screenshots: true
   include_raw_logs: false          # true makes reports big but self-contained
+
+  # Screenshots are EMBEDDED into the HTML as base64 data URIs, not linked.
+  #
+  # Linking was tried first and looked correct - the <img src="file:///..."> tags
+  # were right and the PNGs were on disk - but the images rendered as nothing. A
+  # `file://` subresource is blocked when the page is served over http, inside an
+  # IDE webview, and anywhere the absolute path does not exist (an emailed report,
+  # a PR, another machine). Embedding makes the .html a single self-contained
+  # artefact that renders everywhere.
+  #
+  # The cost is file size, so the embedded copy is a downscaled JPEG thumbnail.
+  # The full-resolution PNG stays in artifacts/ and is still hyperlinked, so
+  # clicking a thumbnail opens the original.
+  thumbnail_width: 360             # px; 0 = embed the full-size PNG (large)
+  thumbnail_quality: 72            # JPEG quality for the embedded copy
+
   # Rendered by the ReporterAgent; unknown keys are ignored, so adding a
   # section here is safe even if a run has no data for it.
   sections:

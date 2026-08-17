@@ -43,14 +43,27 @@ class RunContext:
     pad: Any = None            # tools.pad.PadTool
     android: Any = None        # tools.android.AndroidTool
     vision: Any = None         # tools.vision.VisionTool
+    # timing.Timing - the ONE place the project sleeps. Lives here rather than
+    # being constructed per agent so `total_waited` is a single run-wide number
+    # the report can quote, and `execution.settle.scale` applies everywhere at
+    # once. Defaulted lazily in `__post_init__` so older callers still work.
+    timing: Any = None         # timing.Timing
     run_id: str = ""
     started_at: float = field(default_factory=time.time)
     artifacts: list[str] = field(default_factory=list)
     # Kept so ObserverAgent can diff the current frame against the last one.
     last_frame_path: str | None = None
 
+    def __post_init__(self) -> None:
+        if self.timing is None:
+            # Imported here, not at module scope: timing imports schemas, and
+            # state imports schemas too, so a top-level import would be a cycle.
+            from .timing import Timing
+            self.timing = Timing(self.settings)
+
     def elapsed(self) -> float:
         return time.time() - self.started_at
+
 
     def out_of_time(self) -> bool:
         budget = float(self.settings.get("safety.max_run_seconds", 900))

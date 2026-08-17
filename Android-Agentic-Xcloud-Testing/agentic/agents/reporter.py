@@ -29,13 +29,24 @@ actively corrupts the surface most people actually read this on.
 
 from __future__ import annotations
 
+import base64
 import html
+import io
 import time
 from pathlib import Path
 
+from ..logbook import log
 from ..schemas import TestReport, Verdict
 from ..state import GraphState
 from .base import Agent
+
+try:
+    from PIL import Image
+    _PIL = True
+except ImportError:                                  # pragma: no cover
+    Image = None                                     # type: ignore[assignment]
+    _PIL = False
+
 
 ROLE = """\
 You write the executive summary of a test run, for an engineer who was not there.
@@ -51,8 +62,19 @@ Rules:
 * At most 200 words. A report nobody reads protects nobody.
 * Never blur "the firmware accepted the command" with "xCloud reacted". They are
   different claims with different evidence.
+* IF ZERO STEPS RAN, do not diagnose the sensors. No screenshots exist because
+  nothing was executed, not because capture is broken - the sensors were never
+  asked for anything. The cause is whatever HALTED the run, and it is given to
+  you; report that instead. Writing "root cause: sensor failure, the screenshot
+  mechanism did not run" for a run that halted in planning sends the reader to
+  debug a working screenshot pipeline, which is worse than saying nothing.
+* Distinguish CANNOT RUN from FAILED. A scenario needing a capability this rig
+  does not have (text injection, OCR, adb) is BLOCKED on a precondition. That is
+  a fact about the rig, not a defect in xCloud, and the summary must not imply
+  the app was tested and found wanting.
 * Plain prose. No headings, no bullets, no markdown.
 """
+
 
 # Verdict -> (label, colour, one-line meaning). Shared by every renderer so the
 # three formats cannot drift apart in how they describe an outcome.
@@ -147,8 +169,24 @@ class ReporterAgent(Agent):
                 sensors.update(step.observation.sensors_used)
 
         if not sensors:
-            return ("NONE - no sensor produced data, so nothing on screen was "
-                    "verified. This run cannot support any claim about xCloud.")
+            # NO STEPS AT ALL is a different thing from BLIND STEPS, and saying
+            # "no sensor produced data" for the first one is actively misleading.
+            #
+            # It happened for real: a run halted in the ScenarioAgent because the
+            # scenario needed text entry this device refuses, so zero steps ever
+            # executed - and the report announced "Root cause: Sensor failure.
+            # The screenshot capture mechanism did not run", sending the reader
+            # to debug a screenshot pipeline that was working perfectly. The
+            # sensors were never ASKED for anything.
+            if not report.step_results:
+                return ("NOT APPLICABLE - no step ran, so no sensor was ever "
+                        "asked for data. This says NOTHING about whether "
+                        "screenshots work; the run ended before execution "
+                        "began. Look at the halt reason, not at the sensors.")
+            return ("NONE - steps ran but no sensor produced data, so nothing "
+                    "on screen was verified. This run cannot support any claim "
+                    "about xCloud.")
+
 
         verified = t["met"] + t["failed"]
         strength = ("strong" if verified == t["criteria"] and t["criteria"]
@@ -371,27 +409,55 @@ class ReporterAgent(Agent):
                 out.append("")
 
         if report.step_results:
+            # Both change ratios are shown side by side, because the WHOLE point
+            # of the two-look cycle is that the numbers can disagree - and when
+            # they do, the reader must be able to see it without opening the JSON.
             out += ["## Steps", "",
-                    "| # | Action | Expectation | HW | Met | Evidence |",
-                    "|---|---|---|---|---|---|"]
+                    "| # | Action | Expectation | HW | Met | Glance | Settled | "
+                    "Reacted | Waited |",
+                    "|---|---|---|---|---|---|---|---|---|"]
             for r in report.step_results:
                 step = r.step
                 met = {True: "yes", False: "**NO**", None: "?"}[r.expectation_met]
                 action = f"`{step.kind.value}` {step.target or ''}".strip()
                 if step.times > 1:
                     action += f" x{step.times}"
-                bits = []
-                obs = r.observation
-                if obs and obs.change_ratio is not None:
-                    bits.append(f"screen {obs.change_ratio:.1%}")
+
+                def ratio(o: object) -> str:
+                    if o is None or getattr(o, "change_ratio", None) is None:
+                        return "-"
+                    return f"{o.change_ratio:.2%}"       # type: ignore[union-attr]
+
+                reacted = r.reacted_on
                 if r.silent_failure:
-                    bits.append("**SILENT FAILURE**")
+                    reacted = "**SILENT FAILURE**"
+                elif r.reacted_on == "glance":
+                    # Flagged because under the old single-look harness this step
+                    # would have been recorded as a failure.
+                    reacted = "glance only *(transient)*"
                 out.append(
                     f"| `{step.id}` | {action} | "
-                    f"{(step.expectation or '-')[:70]} | "
+                    f"{(step.expectation or '-')[:60]} | "
                     f"{'ok' if r.hardware_ok else 'no'} | {met} | "
-                    f"{', '.join(bits)} |")
+                    f"{ratio(r.glance_observation)} | "
+                    f"{ratio(r.observation)} | {reacted} | "
+                    f"{r.waited_seconds:.1f}s |")
             out.append("")
+
+            transient = [r for r in report.step_results
+                         if r.reacted_on == "glance"]
+            if transient:
+                out += [
+                    "> **Read this before doubting the hardware.** "
+                    + ", ".join(f"`{r.step.id}`" for r in transient)
+                    + " reacted ONLY in the glance frame, taken moments after "
+                      "the input, and had settled back by the time the second "
+                      "frame was captured. The input DID reach xCloud. A harness "
+                      "that looked once, later, would have reported these as "
+                      "failures - which is exactly what happened in run "
+                      "20260817-105323 before the two-look cycle existed.",
+                    ""]
+
 
         shots = [(r.step.id, r.observation.screenshot_path)
                  for r in report.step_results
@@ -434,10 +500,72 @@ class ReporterAgent(Agent):
         return "\n".join(out)
 
     # ----------------------------------------------------------------------
+    # Screenshot embedding
+    # ----------------------------------------------------------------------
+    def _thumb_data_uri(self, path: str) -> str | None:
+        """Read a screenshot and return an inline `data:` URI. None on failure.
+
+        WHY EMBED INSTEAD OF LINKING
+        ---------------------------
+        The report previously used `<img src="file:///C:/...">`. Those tags were
+        correct and the PNGs existed on disk, but they still rendered as nothing,
+        because a `file://` SUBRESOURCE is blocked in every situation that
+        matters:
+
+          * opened through any http server or preview pane - a page on `http://`
+            may not pull in `file://` content (mixed local/remote origin)
+          * a VS Code / IDE webview - `file://` is outside the webview's allowed
+            resource roots
+          * emailed, uploaded to a PR, or copied to another machine - the
+            absolute path simply does not exist there
+
+        So the screenshots were "not there in web reports" even though they were
+        captured, which is the same failure mode as the timing bug in miniature:
+        the evidence existed and the report could not show it.
+
+        Embedding makes the HTML a SINGLE self-contained artefact that renders
+        anywhere. The images are downscaled hard first - they are thumbnails in
+        the table, and a full 1080p PNG per frame would produce a 40 MB report
+        that no browser opens happily. The full-resolution file stays on disk and
+        is still linked, so nothing is lost.
+        """
+        try:
+            raw = Path(path).read_bytes()
+        except OSError as exc:
+            log.warn(f"cannot embed {path} in the HTML report: {exc}")
+            return None
+
+        width = int(self.s.get("report.thumbnail_width", 360))
+        if not _PIL or width <= 0:
+            # No Pillow: embed the original bytes rather than showing nothing.
+            # Honest but potentially large, so say so once.
+            if not _PIL:
+                log.debug("pillow missing: screenshots are embedded at full "
+                          "size, so the HTML report will be large")
+            return ("data:image/png;base64,"
+                    + base64.b64encode(raw).decode("ascii"))
+        try:
+            with Image.open(io.BytesIO(raw)) as img:
+                img = img.convert("RGB")
+                if img.width > width:
+                    ratio = width / float(img.width)
+                    img = img.resize((width, max(1, int(img.height * ratio))))
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG",
+                         quality=int(self.s.get("report.thumbnail_quality", 72)))
+            return ("data:image/jpeg;base64,"
+                    + base64.b64encode(buf.getvalue()).decode("ascii"))
+        except Exception as exc:                     # noqa: BLE001
+            log.warn(f"cannot downscale {path} for the report: {exc}")
+            return ("data:image/png;base64,"
+                    + base64.b64encode(raw).decode("ascii"))
+
+    # ----------------------------------------------------------------------
     # HTML
     # ----------------------------------------------------------------------
     def _html(self, report: TestReport) -> str:
         esc = html.escape
+
         label, colour, meaning = VERDICT_STYLE[report.verdict]
         t = self._tally(report)
         title = report.scenario.title if report.scenario else report.run_id
@@ -488,29 +616,64 @@ class ReporterAgent(Agent):
                     f'<td>{c.confidence:.0%}</td>'
                     f'<td class="muted">{esc(c.reasoning)}</td></tr>')
 
+        # Both frames are rendered, captioned with their change ratio. Seeing the
+        # pair is the fastest possible way to settle "did the app react" - a
+        # reader can compare the two images directly instead of trusting a number.
         step_rows = ""
         for r in report.step_results:
             step = r.step
             word, tone = {True: ("yes", "#1a7f37"), False: ("NO", "#cf222e"),
                           None: ("?", "#9a6700")}[r.expectation_met]
-            shot = ""
-            if r.observation and r.observation.screenshot_path:
-                url = Path(r.observation.screenshot_path).as_uri()
-                shot = (f'<a href="{url}" target="_blank">'
-                        f'<img src="{url}" loading="lazy"></a>')
+
+            def frame(obs: object, caption: str) -> str:
+                path = getattr(obs, "screenshot_path", None) if obs else None
+                if not path:
+                    # Say so, rather than leaving an empty cell. A missing frame
+                    # is a finding: it means this step could not be judged from
+                    # pixels, and silence would hide that.
+                    return (f'<figure><div class="noshot">no {caption}<br>'
+                            f'frame</div></figure>')
+                ratio = getattr(obs, "change_ratio", None)
+                pct = f"{ratio:.2%}" if ratio is not None else "not measured"
+                embedded = self._thumb_data_uri(path)
+                if embedded is None:
+                    return (f'<figure><div class="noshot">{caption}<br>'
+                            f'unreadable</div>'
+                            f'<figcaption>{pct}</figcaption></figure>')
+                # The thumbnail is embedded so it renders anywhere; the href
+                # still points at the full-resolution PNG on disk for anyone
+                # reading the report on the machine that produced it.
+                return (f'<figure><a href="{Path(path).as_uri()}" '
+                        f'target="_blank" title="{esc(Path(path).name)}">'
+                        f'<img src="{embedded}" alt="{esc(caption)} frame"></a>'
+                        f'<figcaption>{caption}<br>{pct}</figcaption></figure>')
+
+            shots = (frame(r.glance_observation, "glance")
+                     + frame(r.observation, "settled"))
+
+
             badge = ('<span class="badge">SILENT FAILURE</span>'
                      if r.silent_failure else "")
-            change = ""
-            if r.observation and r.observation.change_ratio is not None:
-                change = f'<div class="muted">screen {r.observation.change_ratio:.1%}</div>'
+            if not r.silent_failure and r.reacted_on == "glance":
+                # The case the old harness got wrong. Marked so nobody re-opens
+                # the same investigation into hardware that is working.
+                badge = ('<span class="badge transient">TRANSIENT - input DID '
+                         'arrive</span>')
+
+            meta = (f'<div class="muted">reacted_on={esc(r.reacted_on)}'
+                    f' &middot; waited {r.waited_seconds:.1f}s'
+                    + (f' &middot; {esc(r.settle_profile)}'
+                       if r.settle_profile else "")
+                    + '</div>')
             step_rows += (
                 f'<tr><td><code>{esc(step.id)}</code></td>'
                 f'<td><b>{esc(step.kind.value)}</b> {esc(step.target or "")}</td>'
                 f'<td>{esc(step.expectation or "-")}</td>'
                 f'<td>{"ok" if r.hardware_ok else "no"}</td>'
                 f'<td style="color:{tone};font-weight:600">{word}{badge}</td>'
-                f'<td class="muted">{esc(r.reasoning[:280])}{change}</td>'
-                f'<td>{shot}</td></tr>')
+                f'<td class="muted">{esc(r.reasoning[:280])}{meta}</td>'
+                f'<td><div class="frames">{shots}</div></td></tr>')
+
 
         rca_block = ""
         if report.root_cause:
@@ -605,6 +768,16 @@ class ReporterAgent(Agent):
    border-radius:0 6px 6px 0;margin:.75rem 0}}
  .badge{{background:#cf222e;color:#fff;font-size:.65rem;padding:.1rem .4rem;
    border-radius:3px;margin-left:.4rem;white-space:nowrap}}
+ .badge.transient{{background:#0969da}}
+ .frames{{display:flex;gap:.4rem}}
+ figure{{margin:0}}
+ figcaption{{font-size:.65rem;color:var(--muted);text-align:center;
+   margin-top:.2rem;line-height:1.3}}
+ .noshot{{width:110px;height:150px;border:1px dashed var(--line);
+   border-radius:4px;display:flex;align-items:center;justify-content:center;
+   text-align:center;font-size:.62rem;color:var(--muted);background:var(--bg)}}
+
+
  footer{{margin-top:2.5rem;padding-top:1rem;border-top:1px solid var(--line);
    color:var(--muted);font-size:.82rem}}
  details{{margin:.5rem 0}} summary{{cursor:pointer;font-weight:600}}

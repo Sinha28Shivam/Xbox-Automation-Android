@@ -49,6 +49,8 @@ class ActionKind(str, Enum):
     WAIT = "wait"             # sleep
     OBSERVE = "observe"       # screenshot + OCR + describe, no input
     LAUNCH_PWA = "launch_pwa"  # open the xCloud URL in a browser
+    ADB_TEXT = "adb_text"     # inject text into focused input field via ADB
+    ADB_KEYEVENT = "adb_keyevent"  # inject keycode (e.g. 66=ENTER) via ADB
     ASSERT = "assert"         # check an expectation against observation
 
 
@@ -174,6 +176,7 @@ class Capabilities(BaseModel):
     can_read_text: bool = False       # OCR present
     can_read_logs: bool = False
     can_launch_pwa: bool = False
+    can_adb_text: bool = False        # ADB text injection into focused fields
     vision_model: bool = False        # the LLM profile can see images
 
     unavailable: list[str] = Field(
@@ -198,9 +201,10 @@ class Capabilities(BaseModel):
             ("send_input", self.can_send_input),
             ("screenshot", self.can_screenshot),
             ("ocr_text", self.can_read_text),
-            ("logcat", self.can_read_logs),
+            ("logs", self.can_read_logs),
             ("launch_pwa", self.can_launch_pwa),
-            ("vision_llm", self.vision_model),
+            ("adb_text", self.can_adb_text),
+            ("vision_model", self.vision_model),
         ) if ok]
         lines.append(f"available sensors/actuators: {', '.join(sensors) or 'none'}")
         if self.unavailable:
@@ -295,12 +299,36 @@ class StepResult(BaseModel):
     expectation_met: bool | None = None   # None = not checked / unknowable
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     reasoning: str = ""
+    # The SETTLED look: taken after the animation finished. This is the state a
+    # judgement about "what does the screen show now" must be made against.
     observation: Observation | None = None
+    # The GLANCE: taken ~0.45s after the input, before the UI settles.
+    #
+    # Run 20260817-105323 is why this field exists. Its nav_test moved the screen
+    # 3.257%, then the only observation that counted was taken after the highlight
+    # had settled back (0.074%) and the run was recorded as a FAIL. A transient
+    # reaction proves the input arrived exactly as well as a persistent one, so
+    # the evidence must be captured before it evaporates, not only after.
+    glance_observation: Observation | None = None
+    # Which of the two looks (if either) showed motion. Kept as a field rather
+    # than derived, because the evaluator and the RCA agent both need to cite it.
+    reacted_on: Literal["glance", "settle", "both", "neither", "unknown"] = \
+        "unknown"
+    # How long this step deliberately waited, and why. Makes "the run took 338s"
+    # answerable from the report instead of from screenshot timestamps.
+    waited_seconds: float = 0.0
+    settle_profile: str = ""
     error: str | None = None
     duration_seconds: float = 0.0
     # True when hardware said OK but nothing visibly happened - the exact trap
     # documented in the parent README ("Commands say ok but phone does nothing").
+    #
+    # NOTE the strengthened bar: this is only set when NEITHER look saw motion.
+    # Under the old single-look rule it could fire on a step whose evidence had
+    # simply been photographed too late, which is a harness defect wearing the
+    # costume of a hardware fault - the most expensive kind of wrong answer.
     silent_failure: bool = False
+
 
 
 # ==========================================================================

@@ -250,6 +250,24 @@ timing:
   stream_start_wait: 25.0         # "starting your game" -> playable
   app_launch_wait: 8.0            # Game Pass app cold start
 
+  # From the stream becoming playable to the GAME's own main menu. These are two
+  # different milestones and conflating them is a real source of false failures:
+  # a live stream showing a publisher logo is not a main menu.
+  #
+  # A cloud session starts the game cold, so this covers splash screens, shader
+  # warm-up, an in-game EULA, and any "press any button" or save-select step
+  # before the menu is reachable. 45s is deliberately generous - the cost of
+  # over-waiting is a slower test, while the cost of under-waiting is a wrong
+  # verdict that sends someone debugging a game that was merely still loading.
+  game_boot_wait: 45.0
+
+  # How long to keep looking for a dialog that may or may not appear at all
+  # (age gate, data-usage notice, controller tip). Used as a POLL budget, not a
+  # flat sleep: if no dialog shows up there is nothing to wait for, and the run
+  # should not pay 8 seconds to discover that.
+  dialog_wait: 8.0
+
+
   link_settle: 1.5                # after opening the serial port
   reconnect_delay: 1.0
   ble_connect_timeout: 30.0

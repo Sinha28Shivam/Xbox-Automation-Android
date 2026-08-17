@@ -48,6 +48,32 @@ class DeviceAgent(Agent):
         caps.can_read_logs = bool(report.android.adb_available
                                   and report.android.device_state == "device")
         caps.can_launch_pwa = caps.can_read_logs
+
+        # can_adb_text is NOT simply "adb is available". Being able to talk to
+        # the device says nothing about being allowed to INJECT INPUT into it:
+        # on this Xiaomi/MIUI phone `adb shell input text` is refused with a
+        # SecurityException (INJECT_EVENTS) while every other adb command works
+        # perfectly. Worse, `input` exits ZERO when refused, so the only way to
+        # know is to try it and read the output.
+        #
+        # It is probed here, once, for a reason: if the planner is told typing is
+        # available when it is not, it will build a plan around a search step
+        # that cannot work, and the run fails several minutes later pointing at
+        # the wrong layer. Discovering it now turns that into an honest,
+        # up-front capability gap.
+        caps.can_adb_text = False
+        if caps.can_read_logs and self.ctx.android is not None:
+            can_inject, inject_detail = self.ctx.android.can_inject_events()
+            caps.can_adb_text = can_inject
+            if not can_inject:
+                caps.unavailable.append(
+                    "adb text/keyevent injection: the device refuses it "
+                    "(INJECT_EVENTS). Everything else over adb works - "
+                    "screenshots, logcat, launching the PWA - so this is a "
+                    "PERMISSION gap, not a broken connection. Any scenario that "
+                    "needs typing cannot run; one that navigates with the D-pad "
+                    "can. " + inject_detail.splitlines()[0])
+
         caps.vision_model = self.llm.supports_vision("observer")
 
         for reason in vision.degraded_reasons:

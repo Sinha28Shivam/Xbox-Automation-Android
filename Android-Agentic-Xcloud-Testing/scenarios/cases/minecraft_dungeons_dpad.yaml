@@ -1,0 +1,200 @@
+# ===========================================================================
+#  CASE: reach Minecraft Dungeons by D-PAD NAVIGATION - no typing, no adb input.
+#
+#  WHY THIS FILE EXISTS ALONGSIDE minecraft_dungeons_launch.yaml
+#  ------------------------------------------------------------
+#  That case searches for the game by name, which needs text entry. A HID gamepad
+#  has no keys, so the text has to come from `adb shell input text` - and THIS
+#  PHONE REFUSES IT:
+#
+#      java.lang.SecurityException: Injecting input events requires the caller
+#      ... to have the INJECT_EVENTS permission.
+#
+#  So that case is correctly reported as not testable here, and the ScenarioAgent
+#  halts before touching the pad. This file is the third of the three options
+#  that case lists, and it is the one that needs no permission at all.
+#
+#  IT IS ALSO THE STRONGER TEST, which is worth saying plainly rather than
+#  treating this as a consolation prize. The search version has a hole in the
+#  middle: its most important step is performed by adb, not by the controller, so
+#  a run can get all the way to the game while proving nothing about the gamepad
+#  in that step. Here EVERY action is a HID report travelling
+#
+#      PC -> serial -> Leonardo -> USB HID -> phone -> xCloud
+#
+#  which means every visible reaction is real evidence, and there is no fixture
+#  to explain away. Slower to reach the game, better at answering the question.
+#
+#  THE OBVIOUS OBJECTION, and the answer
+#  -------------------------------------
+#  "You cannot navigate to a specific tile without knowing where it is."
+#  Correct - and that is exactly why this case does NOT hardcode a route. The
+#  library layout depends on the account, on Game Pass, and on what the server
+#  served today. A fixed "right, right, down, A" would work once and then quietly
+#  test the wrong tile forever.
+#
+#  Instead the plan is: move ONE step, LOOK, decide. The harness already supports
+#  this - `execution.mode: adaptive` re-plans when a step's expectation is not
+#  met, and every input is observed twice (glance + settled). So the agents can
+#  hunt for the tile using the screen as the map, which is what a person does.
+#
+#  If the tile cannot be found within the step budget, that is INCONCLUSIVE, not
+#  FAIL: "we did not find it in 20 moves" is a different statement from "it is
+#  not there", and the report must not blur them.
+# ===========================================================================
+
+id: minecraft_dungeons_dpad
+title: "Minecraft Dungeons can be reached and launched using ONLY the gamepad"
+tags: ["regression", "slow", "stream", "end_to_end", "titled", "no-adb-input"]
+
+intent: >-
+  Reach Minecraft Dungeons in xCloud using nothing but the physical HID gamepad -
+  no text entry and no adb input injection of any kind - then launch it and get
+  to the game's own main menu.
+
+  Every action in this case is a real HID report, so unlike the search-based
+  variant there is no step whose success depends on adb. That makes it the
+  honest end-to-end test of the controller path: if this passes, the whole chain
+  from the Leonardo to xCloud demonstrably works.
+
+preconditions:
+  - "The Leonardo is connected by USB-OTG and its ON LED is lit"
+  - "adb is reachable, for SCREENSHOTS ONLY. This case never uses adb to send
+     input, so the INJECT_EVENTS permission that blocks
+     minecraft_dungeons_launch.yaml is irrelevant here"
+  - "The phone is unlocked, awake, and will not sleep during a ~4 minute run"
+  - "xbox.com/play is signed in to an account that can play Minecraft Dungeons.
+     A missing entitlement is BLOCKED, not FAIL"
+  - "controller_detected.yaml has passed. Without that, a failure here is
+     ambiguous between 'the controller is broken' and 'the tile was not found'"
+  - "execution.max_steps is generous - hunting for a tile costs steps. 60 is
+     usually enough; if the run halts on the step budget, that is INCONCLUSIVE
+     rather than a failure"
+
+# ---------------------------------------------------------------------------
+# HOW TO NAVIGATE - a strategy, deliberately not a fixed button sequence.
+# ---------------------------------------------------------------------------
+navigation_strategy:
+  - "Open the PWA and WAIT screen_load_wait, then OBSERVE before pressing
+     anything. You cannot navigate a screen you have not looked at"
+  - "Send ONE harmless press first (A or Menu), marked optional - xCloud
+     normally consumes the first input clearing its 'connect a controller'
+     prompt, so no reaction to it is correct behaviour"
+  - "Now MOVE ONE STEP AT A TIME and OBSERVE after each. One D-pad press, one
+     look. Do NOT queue several presses: the firmware accepts them all
+     regardless of whether the UI was ready, so a burst overshoots and the run
+     ends up somewhere nobody chose"
+  - "Read the tile labels in each observation and steer toward Minecraft
+     Dungeons. Use OCR text when available and the vision description
+     otherwise. If a rail is clearly the wrong genre, move to the next rail
+     rather than exhausting it"
+  - "Prefer DOWN/UP to change rails and RIGHT/LEFT to move within one, which is
+     how xCloud's grid is laid out. lb/rb may jump between whole sections on
+     some layouts - worth trying if the rails are long"
+  - "If a 'Game Pass' or 'All games' rail exists, it is the most likely place to
+     find the title. If a 'Recently played' rail shows it, better still - fewer
+     moves"
+  - "Stop and report INCONCLUSIVE if the tile has not been found within about 20
+     moves. Do not keep pressing hopefully: an exhausted step budget with no
+     tile is 'not found', which is honestly weaker than 'not present'"
+  - "Once the tile IS focused, press A to open its detail page, confirm a
+     'Play' / 'Play now' action is visible, press A again to launch"
+  - "Then WAIT app_launch_wait, WAIT stream_start_wait for video, dismiss any
+     dialogs with A (OBSERVING FIRST each time), and WAIT game_boot_wait for the
+     game's own splash/save-select before claiming the main menu"
+
+acceptance_criteria:
+
+  # ---- the controller drives the UI ------------------------------------
+  - "The xCloud PWA loads and shows its home or library interface"
+  - "A D-pad press visibly moves the focus/highlight. This is the foundational
+     evidence for this case and every later criterion depends on it"
+  - "Focus can be steered across MULTIPLE rails and tiles by repeated D-pad
+     input, not just moved once - navigation, rather than a single twitch"
+
+  # ---- reaching the game ------------------------------------------------
+  - "A Minecraft Dungeons tile is located and focused using only gamepad input.
+     If it cannot be found within the step budget, this is UNVERIFIED and the
+     run is inconclusive - not a failure, because 'not found in N moves' does
+     not establish 'not present'"
+  - "Pressing A on the focused tile opens the Minecraft Dungeons detail page,
+     identifiable by its title on screen"
+
+  # ---- the detection signal --------------------------------------------
+  - "The detail page shows a 'Play' / 'Play now' action and NO 'connect a
+     controller' notice - xCloud's own statement that it sees a usable pad"
+
+  # ---- launching --------------------------------------------------------
+  - "Pressing A on Play is accepted: a loading / 'starting your game' state
+     appears"
+  - "Any dialog appearing during launch is dismissed with the gamepad by
+     choosing its affirmative option, and the flow continues"
+  - "Real Minecraft Dungeons video replaces the loading state within
+     stream_start_wait"
+
+  # ---- the goal ---------------------------------------------------------
+  - "The game's OWN main menu is reached and identifiable - the Minecraft
+     Dungeons title treatment with entries such as Play, Options or
+     Marketplace. A splash screen, a 'press any button' prompt, or a
+     save-select screen is NOT the main menu"
+  - "No error, queue notice or 'unable to start' dialog is left on screen"
+
+out_of_scope:
+  - "Playing the game or anything past the main menu"
+  - "WHICH route through the library was taken - it depends on the account and
+     on today's layout, so the route is not part of the result"
+  - "How MANY presses it took. Slower is not a failure; not arriving is"
+  - "Whether the account owns the title - that is BLOCKED, not FAIL"
+  - "Video quality, bitrate, audio, or in-game input latency"
+  - "Text entry of any kind. That is what minecraft_dungeons_launch.yaml is for,
+     and it needs a permission this device does not grant"
+
+notes: >-
+  THIS CASE USES NO ADB INPUT AT ALL. adb is used only to take screenshots and
+  read logs. So the INJECT_EVENTS refusal that makes
+  minecraft_dungeons_launch.yaml untestable on this phone has no effect here -
+  and every reaction observed is genuinely attributable to the controller. That
+  is the whole reason this file exists.
+
+  ONE PRESS, ONE LOOK. The strongest temptation in a navigation case is to send
+  several presses and then check. Resist it. Each press is queued by the firmware
+  whether or not the UI was ready, so a burst can scroll past the target, and the
+  run then reports "tile not found" about a tile it flew over. An OBSERVE between
+  presses costs a screenshot and saves the whole run.
+
+  ON THE TWO-LOOK CYCLE, which matters here more than in any other case because
+  this case is almost entirely menu navigation. Every input is observed twice - a
+  glance ~0.5s after it, then a settled frame - and a step counts as reacting if
+  EITHER moved. xCloud's highlight animates and settles, so `reacted_on=glance`
+  is a SUCCESS, not a near miss. Run 20260817-105323 recorded exactly that
+  pattern as a FAIL because it looked once, late, and its RCA blamed the
+  hardware. Do not re-open that misdiagnosis.
+
+  WHEN THE HIGHLIGHT DOES NOT MOVE, distinguish three causes before concluding
+  the controller is broken: (1) focus is already at the edge of a rail, so the
+  press was correct and had nothing to do - try the perpendicular direction;
+  (2) a dialog or the on-screen keyboard has stolen input - the observation will
+  show it; (3) the input genuinely did not arrive, which is the real finding.
+  Only the third is a controller fault.
+
+  ON JUDGING ONCE VIDEO IS PLAYING. The frame diff is reliable in menus and
+  nearly useless in a live stream, where every frame differs from the last. Once
+  game video is up, judge from WHAT IS VISIBLE - the vision description and OCR
+  text - not from change_ratio.
+
+  A QUEUE IS NOT A FAILURE. "You are number N in line" means the service accepted
+  the request and is rationing capacity. Inconclusive, with the position quoted.
+
+  ON WAIT TIMES. Ordinary presses need nothing added - the harness applies a
+  glance+settle pair automatically. Use the NAMED values from
+  ../config/controls.yaml for the slow moments only: screen_load_wait after the
+  PWA and after the detail page, app_launch_wait then stream_start_wait after
+  pressing Play, and game_boot_wait after video appears. Reaching a stream is not
+  reaching the main menu, which is exactly what game_boot_wait covers.
+
+  IF THIS FAILS, the LAYER matters more than the verdict: the highlight never
+  moving (controller, or a dialog stealing input); the tile never being found
+  (layout, entitlement, or too few steps - all inconclusive rather than failed);
+  'Play now' absent (the controller genuinely is not detected); the stream never
+  starting (network or service); or the stream running while the menu never
+  arrives (the game's own boot, or a save-select screen mistaken for the menu).

@@ -30,8 +30,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..logbook import log
 from ..schemas import ActionKind, Capabilities, PadStatus, PlanStep
 from ..settings import Settings
+
 
 
 def _load_pad_module(host_dir: Path) -> Any:
@@ -76,8 +78,14 @@ class PadTool:
         reportable outcome (BLOCKED), not a stack trace."""
         dry_run = bool(self.s.get("hardware.dry_run", False))
         self.status.dry_run = dry_run
+        # Opening the port resets the board and waits out `boot_wait` (1.5s in
+        # controls.yaml), and auto-detection can probe several COM ports. That is
+        # seconds of silence at the very start of a run, which is exactly when a
+        # reader is deciding whether the tool has hung.
+        log.hw(f"opening the pad link (dry_run={dry_run})", indent=0)
 
         try:
+
             host_dir = self.s.resolve_path("hardware.pad_module_dir", "../host")
             self._module = _load_pad_module(host_dir)
             controls = self.s.resolve_path("hardware.controls_config",
@@ -135,16 +143,31 @@ class PadTool:
                 "board is alive but NO host has enumerated the pad: the phone "
                 "is probably not in OTG host mode (check the OTG adapter is at "
                 "the PHONE end and the Leonardo's ON LED is lit)")
+
+        # Report the handshake as a single scannable line. `host_enumerated` is
+        # the most diagnostic bit on the whole rig: false means every input will
+        # be accepted by the firmware and none will reach the phone, so seeing it
+        # here saves reading a whole run's worth of silent failures to find out.
+        (log.ok if self.status.link_open else log.error)(
+            f"pad link {'OPEN' if self.status.link_open else 'CLOSED'} "
+            f"port={self.status.port} firmware={self.status.firmware} "
+            f"transport={self.status.transport} "
+            f"host_enumerated={self.status.pad_connected_to_phone}")
+        for note in self.status.diagnostics:
+            log.warn(note, indent=1)
         return self.status
+
 
     def close(self) -> None:
         """Always release inputs. A held stick outlives this process otherwise."""
         if self.pad is not None and self.s.get("execution.always_reset_on_exit",
                                                True):
+            log.hw("releasing every control and closing the port", indent=0)
             with contextlib.suppress(Exception):
                 with contextlib.redirect_stdout(io.StringIO()):
                     self.pad.close()
         self.pad = None
+
 
     # -- capability discovery ---------------------------------------------
     def capabilities(self) -> Capabilities:
