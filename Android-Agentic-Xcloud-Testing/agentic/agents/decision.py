@@ -86,8 +86,6 @@ class DecisionAgent(Agent):
                           expected_states=[ScreenType.GAME_MAIN_MENU, ScreenType.GAME_SPLASH, ScreenType.IN_GAME]), "press-any-button"
 
         # SEARCH-FIRST MUST RUN BEFORE THE GENERIC OVERLAY/DOWN RULE.
-        # On xCloud mobile, the Y search panel may be represented as an overlay
-        # or keyboard state. B must never close it before the text fixture runs.
         if self._search_first(goal, state) and gs.screen_type in (
                 ScreenType.XCLOUD_HOME, ScreenType.XCLOUD_LIBRARY,
                 ScreenType.OVERLAY, ScreenType.KEYBOARD):
@@ -127,6 +125,12 @@ class DecisionAgent(Agent):
         return "search" in text
 
     @staticmethod
+    def _search_text_already_sent(state: GraphState) -> bool:
+        transitions: list[Transition] = list(state.get("transitions", []))
+        return any(t.action and t.action.control == "__adb_text__"
+                   for t in transitions[-6:])
+
+    @staticmethod
     def _search_visible(gs: GameState) -> bool:
         blob = " ".join(gs.visible_text + gs.evidence + [gs.focus.element or ""])
         if gs.observation:
@@ -138,6 +142,11 @@ class DecisionAgent(Agent):
     def _search_action(self, gs: GameState, goal: Goal,
                        caps: Capabilities | None, state: GraphState,
                        buttons: set[str]):
+        # Once the text fixture has run, never type again. From here onward the
+        # controller owns the search-result navigation.
+        if self._search_text_already_sent(state):
+            return self._navigation_action(gs, goal, caps, state)
+
         if self._search_visible(gs) and goal.target:
             return Action(type=ActionType.OBSERVE, control="__adb_text__",
                           rationale=(f"search panel is visible/focused; type {goal.target!r} "
