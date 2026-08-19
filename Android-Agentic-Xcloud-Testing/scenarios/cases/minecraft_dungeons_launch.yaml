@@ -1,477 +1,95 @@
-# ===========================================================================
-# CASE: Select Minecraft Dungeons from the xCloud starting screen and
-#       launch it until the actual Minecraft Dungeons main menu is reached.
+# Search-first launch case.
 #
-# PURE GAMEPAD WORKFLOW
-# ---------------------
-# All game interaction must be performed through the physical
-# Leonardo USB-HID controller.
-#
-# ADB may ONLY be used for:
-#   - screenshots
-#   - screen observation
-#   - OCR / visual analysis
-#
-# ADB MUST NOT:
-#   - tap the screen
-#   - inject key events
-#   - type text
-#   - search for the game
-#   - launch the game
-#
-# IMPORTANT:
-# ----------
-# DO NOT assume that pressing A on a game tile always opens a detail page.
-#
-# Depending on the xCloud UI state, selecting a game from:
-#   - Jump back in
-#   - Recently Played
-#   - Featured
-#   - Game Pass rails
-#
-# may either:
-#
-#   A) open a game detail page
-# OR
-#   B) immediately start/resume the game.
-#
-# The agent MUST observe the resulting screen and continue from the
-# state that is actually detected.
-# ===========================================================================
+# The game title is supplied through the global runtime input token `$input`.
+# Set XAT_RUNTIME_INPUT (or runtime.input in config) to choose another title.
+# ADB text is a fixture for search only; all game selection and launch actions
+# after the search remain physical gamepad HID actions.
 
 id: minecraft_dungeons_launch
-
-title: >
-  Launch Minecraft Dungeons from the xCloud starting screen and reach
-  the Minecraft Dungeons main menu
-
-tags:
-  - regression
-  - slow
-  - stream
-  - end_to_end
-  - titled
-  - gamepad_only
-
+title: "Search for Minecraft Dungeons and reach its main menu"
+tags: ["regression", "slow", "stream", "end_to_end", "search_first"]
 
 intent: >-
-  Use only physical gamepad input to launch Minecraft Dungeons from the
-  xCloud starting screen and reach the game's own main menu.
-
-  The agent must use visual observation to determine the current UI state
-  after every important controller action.
-
-  The agent MUST NOT assume that selecting Minecraft Dungeons always opens
-  a game detail page.
-
-  If the selected tile opens a detail page, activate the Play/Play now
-  action with A.
-
-  If selecting the tile immediately starts a fullscreen transition,
-  loading screen, or game stream, treat that as a valid launch transition
-  and continue waiting rather than declaring failure.
-
-  The final success condition is the actual Minecraft Dungeons main menu.
-
+  Open xCloud, use its search UI to find the requested game by name using the
+  global `$input` value, select the matching result with the physical gamepad,
+  launch it, and reach the game's own main menu. Do not hunt the library with
+  Minecraft-specific D-pad navigation.
 
 preconditions:
-
-  - "The Leonardo is connected to the phone by USB-OTG"
-  - "The Leonardo ON LED is lit"
-  - "ADB is reachable only for visual screenshots"
+  - "The Leonardo is connected to the phone by USB-OTG and its ON LED is lit"
+  - "ADB is reachable and the device permits input injection for the search fixture"
   - "The phone is unlocked and awake"
-  - "xCloud is already open or can be opened at https://www.xbox.com/play"
-  - "The user is signed in to an account with access to Minecraft Dungeons"
-  - "Minecraft Dungeons is visible on the xCloud starting screen"
+  - "xCloud is signed in and can access the requested game"
+  - "XAT_RUNTIME_INPUT or runtime.input contains the requested game title"
 
+input:
+  token: "$input"
+  operation: "play"
+  default: "Minecraft Dungeons"
+  description: "Game title to search for before controller-based selection"
+
+search_strategy:
+  - "Launch/open xCloud and wait for the page to stabilize"
+  - "Observe before interacting so the agent knows whether the search control is available"
+  - "Use the physical controller to open/focus the xCloud search field; do not use adb tap"
+  - "Use ADB_TEXT with target `$input` once the search field is visibly focused"
+  - "Verify that the requested text was accepted before continuing"
+  - "Use physical D-pad/gamepad input to move from the search field to the result"
+  - "Select the matching result with physical A"
+  - "If the result opens a detail page, activate Play/Play now with physical A"
+  - "If selection directly enters fullscreen/loading, do not press A again; wait and observe"
 
 controller_policy:
-
-  allowed_inputs:
-    - a
-    - b
-    - x
-    - y
-    - up
-    - down
-    - left
-    - right
-    - guide
-    - start
-    - back
-
-  prohibited_inputs:
-    - adb_tap
-    - adb_keyevent
-    - adb_text
-    - touchscreen_input
-    - virtual_keyboard
-    - browser_search
-
-  navigation_rule: >-
-    Navigation MUST be closed-loop.
-
-    Never assume that N controller presses are sufficient to reach a target.
-
-    After navigation input, observe the screen and verify the focused item.
-
-    If the target is already focused, do not send another navigation input.
-
+  allowed_inputs: [a, b, x, y, up, down, left, right, guide, start, back]
+  prohibited_inputs: [adb_tap, touchscreen_input, virtual_keyboard]
+  rule: >-
+    The controller is still the only actuator used for game selection and game
+    launch. ADB text is permitted only as the search fixture because the HID
+    controller cannot type a game title.
 
 state_model:
-
-  xcloud_states:
-
-    XCLOUD_HOME:
-      description: >
-        xCloud home/starting screen containing game rails or tiles.
-
-    GAME_FOCUSED:
-      description: >
-        Minecraft Dungeons tile is visibly focused/selected.
-
-      evidence:
-        - "Minecraft Dungeons title/image is visible"
-        - "Visible focus border surrounds Minecraft Dungeons"
-
-    GAME_DETAIL:
-      description: >
-        Minecraft Dungeons detail page is visible.
-
-      evidence:
-        - "Minecraft Dungeons title is visible"
-        - "Play or Play now action is visible"
-
-    FULLSCREEN_TRANSITION:
-      description: >
-        xCloud is transitioning from browser/UI mode into the game stream.
-
-      examples:
-        - "Mostly black screen"
-        - "Xbox fullscreen transition"
-        - "Exit fullscreen instruction"
-
-    GAME_LOADING:
-      description: >
-        Xbox/xCloud is loading or connecting to the game.
-
-      examples:
-        - "Xbox loading animation"
-        - "Starting your game"
-        - "Game loading screen"
-        - "Game connection screen"
-
-    LIVE_GAME_STREAM:
-      description: >
-        Actual game video is visible.
-
-    GAME_SPLASH:
-      description: >
-        Minecraft Dungeons startup logos, splash screens, or
-        press-any-button screen are visible.
-
-    GAME_MAIN_MENU:
-      description: >
-        Minecraft Dungeons main menu is visible.
-
-      evidence:
-        - "Minecraft Dungeons game UI is visible"
-        - "Play / Options / Marketplace or equivalent game menu elements"
-
-    STREAM_ERROR:
-      description: >
-        Fatal xCloud/game streaming error.
-
-    QUEUE:
-      description: >
-        User is waiting in a game/server queue.
-
-    SESSION_EXPIRED:
-      description: >
-        Authentication/session has expired.
-
-    UNKNOWN:
-      description: >
-        Current screen cannot confidently be classified.
-
+  SEARCH_FIELD:
+    description: "xCloud search field is focused and ready for text input"
+  SEARCH_RESULTS:
+    description: "Search results for the requested title are visible"
+  GAME_FOCUSED:
+    description: "The requested game result is visibly focused"
+  GAME_DETAIL:
+    description: "The requested game's detail page with Play/Play now is visible"
+  FULLSCREEN_TRANSITION:
+    description: "xCloud is handing the selected game into the stream"
+  GAME_LOADING:
+    description: "xCloud/Xbox is loading or connecting to the game"
+  LIVE_GAME_STREAM:
+    description: "Actual game video is visible"
+  GAME_SPLASH:
+    description: "Game startup/splash/press-any-button screen is visible"
+  GAME_MAIN_MENU:
+    description: "The game's own main menu is visible"
+  QUEUE:
+    description: "The game is waiting in an xCloud service queue"
+  STREAM_ERROR:
+    description: "Fatal xCloud/game streaming error"
+  SESSION_EXPIRED:
+    description: "Authentication/session has expired"
+  UNKNOWN:
+    description: "The current screen cannot be classified confidently"
 
 acceptance_criteria:
-
-  # -----------------------------------------------------------------------
-  # XCloud START
-  # -----------------------------------------------------------------------
-
   - "xCloud loads successfully"
-  - "Starting screen or game rail becomes visible"
-
-  # -----------------------------------------------------------------------
-  # GAME SELECTION
-  # -----------------------------------------------------------------------
-
-  - "Minecraft Dungeons becomes visibly focused"
-
-  # -----------------------------------------------------------------------
-  # LAUNCH
-  # -----------------------------------------------------------------------
-
-  - >
-    Pressing A on Minecraft Dungeons produces a valid launch transition.
-
-  - >
-    A valid launch transition may be ANY of:
-      GAME_DETAIL,
-      FULLSCREEN_TRANSITION,
-      GAME_LOADING,
-      LIVE_GAME_STREAM,
-      GAME_SPLASH.
-
-  - >
-    The agent MUST NOT classify FULLSCREEN_TRANSITION or GAME_LOADING
-    as a failure.
-
-  # -----------------------------------------------------------------------
-  # DETAIL PAGE PATH
-  # -----------------------------------------------------------------------
-
-  - >
-    If GAME_DETAIL is detected, locate the Play/Play now action and
-    activate it with A.
-
-  # -----------------------------------------------------------------------
-  # DIRECT LAUNCH PATH
-  # -----------------------------------------------------------------------
-
-  - >
-    If A on the focused Minecraft Dungeons tile directly produces
-    FULLSCREEN_TRANSITION or GAME_LOADING, DO NOT press A again.
-
-  - >
-    Continue observing until the game stream becomes available.
-
-  # -----------------------------------------------------------------------
-  # GAME BOOT
-  # -----------------------------------------------------------------------
-
-  - >
-    If LIVE_GAME_STREAM or GAME_SPLASH is detected, continue waiting
-    for Minecraft Dungeons to finish booting.
-
-  - >
-    If a "Press any button to continue" screen is detected, press A once.
-
-  # -----------------------------------------------------------------------
-  # FINAL GOAL
-  # -----------------------------------------------------------------------
-
-  - >
-    The final success condition is GAME_MAIN_MENU.
-
-  - >
-    The run passes only when Minecraft Dungeons' own main menu is
-    visually confirmed.
-
-  - >
-    A loading screen alone is NOT final success.
-
-  - >
-    A fullscreen transition alone is NOT final success.
-
-  - >
-    The xCloud home screen is NOT final success.
-
-
-steps:
-
-  - action: LAUNCH_PWA
-    target: "https://www.xbox.com/play"
-    wait: screen_load_wait
-
-  - action: OBSERVE
-    expected:
-      - XCLOUD_HOME
-
-  - action: WAKE_CONTROLLER
-    description: >
-      Use the existing controller handshake only if the UI indicates that
-      controller activation is required.
-
-  - action: OBSERVE
-
-  - action: NAVIGATE_TO_GAME
-    target: "Minecraft Dungeons"
-
-    rules:
-      - >
-        Use directional gamepad input only.
-      - >
-        After each directional action, observe the screen.
-      - >
-        Stop immediately when Minecraft Dungeons is visibly focused.
-
-  - action: OBSERVE
-    expected:
-      - GAME_FOCUSED
-
-  - action: PRESS
-    button: a
-
-  - action: OBSERVE
-
-    valid_transitions:
-      - GAME_DETAIL
-      - FULLSCREEN_TRANSITION
-      - GAME_LOADING
-      - LIVE_GAME_STREAM
-      - GAME_SPLASH
-
-    invalid:
-      - STREAM_ERROR
-      - SESSION_EXPIRED
-
-  - condition: GAME_DETAIL
-
-    action:
-      - OBSERVE
-      - LOCATE_PLAY_BUTTON
-      - PRESS a
-
-  - condition: FULLSCREEN_TRANSITION
-
-    action:
-      - WAIT
-      - OBSERVE
-
-  - condition: GAME_LOADING
-
-    action:
-      - WAIT
-      - OBSERVE
-
-  - condition: LIVE_GAME_STREAM
-
-    action:
-      - OBSERVE
-
-  - condition: GAME_SPLASH
-
-    action:
-      - WAIT
-      - OBSERVE
-
-  - condition: PRESS_ANY_BUTTON_SCREEN
-
-    action:
-      - PRESS a
-      - OBSERVE
-
-  - condition: GAME_MAIN_MENU
-
-    result: PASS
-
-  - condition:
-      - STREAM_ERROR
-      - SESSION_EXPIRED
-      - unrecoverable_failure
-
-    result: FAIL
-
-  - action: RESET_CONTROLLER
-
-
-timing:
-
-  screen_load_wait: 6.0
-
-  detail_view_wait: 3.0
-
-  app_launch_wait: 8.0
-
-  stream_start_wait: 25.0
-
-  game_boot_wait: 45.0
-
-  loading_observation_interval: 3.0
-
-
-observation_policy:
-
-  # -----------------------------------------------------------------------
-  # IMPORTANT: observation is state detection, not just frame difference.
-  # -----------------------------------------------------------------------
-
-  - >
-    Use frame difference to detect whether the screen changed.
-
-  - >
-    Use visual/semantic analysis to determine WHAT state the screen
-    changed into.
-
-  - >
-    A large frame difference means that the action caused a UI transition;
-    it does NOT by itself indicate success or failure.
-
-  - >
-    If the screen changes substantially after a controller action,
-    classify the resulting state before deciding whether the action failed.
-
-  - >
-    Do not require the exact expected screenshot if multiple valid
-    intermediate states are possible.
-
-
-judge_policy:
-
-  success:
-    - GAME_MAIN_MENU
-
-  intermediate:
-    - FULLSCREEN_TRANSITION
-    - GAME_LOADING
-    - LIVE_GAME_STREAM
-    - GAME_SPLASH
-    - GAME_DETAIL
-
-  failure:
-    - STREAM_ERROR
-    - SESSION_EXPIRED
-    - QUEUE_TIMEOUT
-    - unrecoverable_failure
-
-  critical_rule: >
-    NEVER declare RCA merely because the observed screen differs from
-    the originally expected screen.
-
-    First determine whether the observed screen represents:
-      1. successful completion,
-      2. valid intermediate progress,
-      3. recoverable transition,
-      4. actual failure.
-
-
-retry_policy:
-
-  - >
-    Never blindly repeat A after a launch transition has already been
-    detected.
-
-  - >
-    If FULLSCREEN_TRANSITION or GAME_LOADING is detected, wait and observe.
-
-  - >
-    If the game remains in the same loading state for the configured
-    timeout, classify it as a launch timeout.
-
-  - >
-    Only retry an action when evidence indicates that the previous action
-    did not take effect.
-
-
-out_of_scope:
-
-  - "Playing beyond the main menu"
-  - "Account licensing troubleshooting"
-  - "Text searching"
-  - "Virtual keyboard navigation"
-  - "ADB touch input"
-  - "ADB key injection"
-  - "ADB text injection"
+  - "The search field is focused before ADB_TEXT is attempted"
+  - "ADB_TEXT is accepted by the device; a SecurityException or permission denial is a BLOCKED prerequisite, not a controller failure"
+  - "The requested `$input` title appears in the search UI/results"
+  - "The matching result becomes focused using physical gamepad input"
+  - "Pressing physical A on the focused result produces GAME_DETAIL, FULLSCREEN_TRANSITION, GAME_LOADING, LIVE_GAME_STREAM, or GAME_SPLASH"
+  - "If GAME_DETAIL appears, physical A activates Play/Play now"
+  - "FULLSCREEN_TRANSITION and GAME_LOADING are valid launch states, not failures"
+  - "The stream reaches the game's startup state"
+  - "The game's own main menu is reached and identifiable"
+  - "No fatal stream/error/session dialog remains on screen"
+
+notes: >-
+  SEARCH-FIRST is intentionally preferred over library navigation. It is faster,
+  avoids game-specific routes, and works across different xCloud library layouts.
+  `$input` is a global runtime token, so the same scenario structure can be used
+  for other titles without changing controller navigation code.
