@@ -148,11 +148,18 @@ class ExecutorAgent(Agent):
             log.act(f"intent: {step.intent}")
         if step.expectation:
             log.act(f"expects: {step.expectation}")
-        # Enforce ONE input per navigation tick (closed-loop rule: look -> press once -> look)
-        if step.kind == ActionKind.PRESS and step.target and step.target.lower() in ("up", "down", "left", "right"):
-            if step.times and step.times > 1:
-                log.warn(f"Capping {step.target} times from {step.times} to 1 (enforcing single-step closed-loop navigation)", indent=1)
-                step.times = 1
+        # NOTE: the D-pad `times` cap that used to live here has been REMOVED.
+        #
+        # It rewrote `times=3` to `times=1` for directional presses, and it was
+        # needed only because this path makes the planner guess a repeat count
+        # before the first screenshot exists. Capping the count did not fix that
+        # - it just stopped the guess being three times as wrong, and it left no
+        # mechanism to issue the second press if one was not enough.
+        #
+        # The real fix is `execution.mode: closed_loop`, where the action is
+        # chosen AFTER each observation and `Action.times` is constrained to 1 by
+        # the schema, so a repeat count is unrepresentable rather than corrected.
+
 
         # -- 1: act --------------------------------------------------------
         if self.s.get("logs.logcat_enabled", True) and self.ctx.android:
@@ -236,22 +243,25 @@ class ExecutorAgent(Agent):
             adaptations.append(note)
             log.warn(note, indent=1)
 
-        # Closed-loop milestone awareness
-        if observation is not None:
-            if observation.main_menu_visible:
-                log.ok("IN-GAME MAIN MENU DETECTED: target milestone complete!", indent=1)
-            elif observation.detail_page_open:
-                # Detail page already reached: jump ahead past any remaining search/home D-pad moves
-                for idx in range(cursor + 1, len(plan.steps)):
-                    future_step = plan.steps[idx]
-                    if future_step.target in ("a", "confirm") and any(
-                            k in future_step.intent.lower() for k in ("play", "launch", "stream")):
-                        if idx > next_cursor:
-                            log.ok(f"DETAIL PAGE OPEN: jumping directly to {future_step.id} ({future_step.intent})", indent=1)
-                            next_cursor = idx
-                        break
+        # NOTE: the cursor-jump block that used to live here has been REMOVED.
+        #
+        # It read `observation.detail_page_open`, then scanned FUTURE plan steps
+        # and string-matched their `intent` PROSE for "play"/"launch"/"stream" to
+        # guess which step to skip ahead to. That is a state machine emulated
+        # with a substring search over English, and it existed only because a
+        # pre-written linear plan cannot branch.
+        #
+        # It also depended on the game-specific flags that `tools/vision.py` used
+        # to set from `if "minecraft" in combined`, which were unreliable in both
+        # directions and have been removed as well.
+        #
+        # In `execution.mode: closed_loop` the branch is real: the observed
+        # GameState decides the next action, so arriving at a detail page simply
+        # produces a different decision on the next pass. Nothing needs to guess
+        # where to jump, because there is no list to jump within.
 
         if needs_rca:
+
             log.warn(f"routing to RCA after {step.id}", indent=1)
 
         return {

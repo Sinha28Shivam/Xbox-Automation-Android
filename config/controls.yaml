@@ -268,19 +268,77 @@ timing:
   dialog_wait: 8.0
 
 
+  # How long the xCloud Guide overlay takes to animate in after the second
+  # Guide press, before a screenshot can confirm it opened. Too short and the
+  # handshake photographs the page mid-fade and reports that the pad was never
+  # seen - which is the same false-negative shape as looking too late after a
+  # D-pad press, and just as expensive to debug.
+  handshake_settle: 1.2
+  # After B dismisses the overlay. Short: we only need the page back to where
+  # it was before the first real observation is taken.
+  handshake_dismiss: 0.8
+
   link_settle: 1.5                # after opening the serial port
   reconnect_delay: 1.0
   ble_connect_timeout: 30.0
+
 
 # ---------------------------------------------------------------------------
 # SPECIAL / COMPOUND ACTIONS
 # ---------------------------------------------------------------------------
 special_actions:
+  # ==========================================================================
+  # THE ONE THAT IS NOT OPTIONAL
+  # ==========================================================================
+  signal_handshake:
+    description: >-
+      Make the pad VISIBLE to the browser. Required after EVERY fresh page load.
+    # WHY THIS EXISTS - it is a browser protocol step, not a workaround
+    # ------------------------------------------------------------------
+    # The W3C Gamepad API deliberately hides gamepads from a page until the pad
+    # sends a button event:
+    #
+    #     navigator.getGamepads() returns nothing for a pad that has not yet
+    #     reported a button press.
+    #
+    # It is an anti-fingerprinting rule, so it applies to every browser and
+    # cannot be configured away. The consequence for this rig is precise and
+    # easy to misdiagnose:
+    #
+    #   * the Leonardo is enumerated as a USB HID gamepad         (correct)
+    #   * the firmware answers OK to every command                (correct)
+    #   * xCloud cannot see the pad at all                        (also correct)
+    #
+    # until one real button report arrives. So a fresh browser launch always
+    # starts deaf, and every input sent before this sequence is silently
+    # discarded by the PAGE - not by the board, and not by the phone. That is
+    # exactly the shape of a "silent failure" and it wastes a whole run.
+    #
+    # WHY GUIDE, AND WHY TWICE
+    # ------------------------
+    # Guide is used because it produces a VISIBLE, unambiguous reaction (the
+    # xCloud overlay), which makes the handshake verifiable instead of hopeful.
+    # Twice because the first press is commonly consumed by the page taking
+    # focus rather than by the pad announcing itself; a single press often
+    # registers the gamepad without opening anything, leaving nothing to check.
+    #
+    # B dismisses the overlay so the UI is left exactly where it was found. A
+    # handshake that changed the screen would make the first real observation a
+    # measurement of our own side effect.
+    sequence:
+      - { button: "guide", duration: 1.0 }
+      - { wait: 2.0 }
+      - { button: "guide", duration: 1.0 }
+      - { wait: 2.0 }
+      - { button: "b", duration: 1.0 }
+    verified: true
+
   wake_controller:
     description: "One harmless press so xCloud stops showing 'connect a controller'"
     sequence:
       - { button: "a", duration: 0.08 }
     verified: false
+
 
   stream_overlay:
     description: "Open the xCloud in-stream overlay (Guide)"

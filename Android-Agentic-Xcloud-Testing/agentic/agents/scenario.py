@@ -50,12 +50,29 @@ Rules:
 2. If a criterion cannot be checked with the available sensors, still list it but
    set critical=false and name the problem in `risk_notes`. Do not silently drop
    it and do not pretend a different check proves it.
-3. Set is_testable=false when the CORE of the scenario cannot be verified at all
-   (for example it depends on audio, on frame-exact timing, on a specific save
-   file, or on subjective image quality). Explain why in `ambiguities`. Refusing
-   a run is a valid and useful outcome.
+3. Set is_testable=false ONLY when the core of the scenario could never be
+   verified by ANY amount of looking at the screen - it needs audio, frame-exact
+   timing, a specific save file, or a subjective judgement like image quality.
+   Refusing a run is a valid and useful outcome, but it is a strong claim.
+
+   UI VARIABILITY IS NOT A REASON TO REFUSE. All of the following are NORMAL and
+   must NOT set is_testable=false:
+     - "the exact wording may vary" (Play / Play now / Resume)
+     - "the tile's appearance or focus indicator may vary by xCloud version"
+     - "which rail the game appears in is not specified"
+     - "loading time varies with network conditions"
+     - "the game's menu layout may differ by version"
+
+   The runner OBSERVES the screen and decides its next action from what is
+   actually there, one action at a time. It does not follow a pre-written
+   keystroke route, so it does not need to be told in advance what the screen
+   will look like - discovering that is its job. A scenario that says "reach the
+   Minecraft Dungeons main menu" is fully testable even though nobody can say
+   ahead of time how many D-pad presses that takes or exactly what the menu
+   says. Record each such point in `clarified_assumptions` and continue.
 4. Vague scenarios are normal. Do not invent detail: record the ambiguity, state
    the assumption you would proceed with in `clarified_assumptions`, and continue.
+
 5. `estimated_steps` is your honest guess at the number of gamepad actions
    needed. Keep it proportionate - a menu check is a handful, not thirty.
 
@@ -121,10 +138,14 @@ class ScenarioAgent(Agent):
         # do not have. Trust code over prose for what exists.
         self._reconcile_with_capabilities(spec, caps, interpreted)
 
+        # ...and cross-check the REFUSAL, in code. A prompt rule is a request.
+        self._reconsider_refusal(spec, caps)
+
         halt = None
         if not spec.is_testable:
             halt = ("the scenario is not testable with this rig: "
                     + "; ".join(spec.ambiguities or ["no reason given"]))
+
 
         return {
             "scenario": spec,
@@ -204,7 +225,109 @@ class ScenarioAgent(Agent):
                 "capability probe only - it checks whether input reaches "
                 "xCloud, NOT whether the scenario as written is satisfied")
 
+    # Phrases that describe UI VARIABILITY, not untestability. A closed-loop
+    # runner discovers all of these by looking at the screen, which is its whole
+    # job, so none of them is a reason to refuse a run.
+    _VARIABILITY_MARKERS = (
+        "may vary", "might vary", "can vary", "varies",
+        "not specified", "unspecified", "is not stated", "not defined",
+        "exact wording", "exact text", "exact appearance", "exact layout",
+        "exact visual", "may differ", "might differ", "could differ",
+        "depends on version", "by version", "ui version", "pwa version",
+        "network conditions", "server load", "may change",
+        "which rail", "requires scrolling", "may require scrolling",
+    )
+
+    # Things that genuinely CANNOT be seen, however long you look. These are the
+    # only honest reasons to refuse.
+    _REAL_BLOCKERS = (
+        "audio", "sound", "volume level", "frame-exact", "frame exact",
+        "specific save", "saved game", "save file", "image quality",
+        "subjective", "latency measurement", "input lag", "frame rate",
+        "fps", "smoothness", "requires a second account", "two players",
+        "haptic", "rumble", "vibration",
+    )
+
+    def _reconsider_refusal(self, spec: ScenarioSpec, caps: Any) -> None:
+        """Overturn a refusal that rests only on UI variability.
+
+        WHY THIS IS IN CODE
+        -------------------
+        The prompt already says variability is not a reason to refuse, but a
+        prompt is a request. This is the wall - the same distinction this project
+        draws everywhere else between asking a model nicely and enforcing a rule.
+
+        It matters because the failure mode is severe and silent: the run halts
+        at the SCENARIO node, so the pad is never touched, no screenshot is
+        taken, and the report says "inconclusive - nothing was tested". A real
+        run of a perfectly testable scenario is thrown away over the observation
+        that xCloud's button might say "Play now" instead of "Play".
+
+        The asymmetry is deliberate. A refusal citing only variability is
+        overturned; a refusal citing anything in `_REAL_BLOCKERS` stands, and so
+        does a refusal we cannot classify. Being unable to tell is not a licence
+        to proceed.
+        """
+        if spec.is_testable or not spec.ambiguities:
+            return
+
+        blob = " ".join(spec.ambiguities).lower()
+
+        # Any genuine blocker present? Then the refusal stands, whatever else it
+        # also mentions - one unobservable requirement is enough.
+        blockers = [m for m in self._REAL_BLOCKERS if m in blob]
+        if blockers:
+            spec.risk_notes.append(
+                f"refusal upheld: the scenario needs something no camera can "
+                f"see ({', '.join(blockers[:3])})")
+            return
+
+        # Every stated reason is variability?
+        variability = [m for m in self._VARIABILITY_MARKERS if m in blob]
+        if not variability:
+            # Unclassifiable. Leave the refusal alone - a reason we do not
+            # recognise is not a reason we may ignore.
+            return
+
+        # Overturn it, and move the reasons where they belong: they are
+        # assumptions the run proceeds under, not grounds for refusing.
+        spec.is_testable = True
+        spec.clarified_assumptions.extend(spec.ambiguities)
+        spec.ambiguities = []
+        spec.risk_notes.append(
+            "the scenario was initially judged untestable, but every reason "
+            "given was UI VARIABILITY (wording, layout, which rail a game "
+            "appears in, loading time). A closed-loop run resolves those by "
+            "observing the screen and choosing one action at a time, so they "
+            "are recorded as assumptions and the run proceeds. Refusing here "
+            "would have halted before the pad was ever touched and reported "
+            "'nothing was tested', which is the more misleading outcome.")
+
+        # If the refusal stripped every critical criterion, restore criticality
+        # for anything the sensors CAN actually observe - otherwise the run
+        # proceeds but can never claim a pass, which is a refusal by another
+        # name.
+        if caps is not None and spec.acceptance_criteria and not any(
+                c.critical for c in spec.acceptance_criteria):
+            available = {
+                "screen_text": caps.can_read_text,
+                "screen_change": caps.can_screenshot,
+                "pad_state": caps.can_send_input,
+                "logcat": caps.can_read_logs,
+                "focused_window": caps.can_read_logs,
+            }
+            restored = 0
+            for crit in spec.acceptance_criteria:
+                if any(available.get(v) for v in crit.observable_via):
+                    crit.critical = True
+                    restored += 1
+            if restored:
+                spec.risk_notes.append(
+                    f"{restored} criterion(s) restored to critical because the "
+                    f"sensors needed to check them ARE available this run")
+
     def _mechanical_spec(self, raw: str, state: GraphState) -> ScenarioSpec:
+
         """No-LLM fallback.
 
         Deliberately dumb: it does NOT try to guess intent from keywords. It

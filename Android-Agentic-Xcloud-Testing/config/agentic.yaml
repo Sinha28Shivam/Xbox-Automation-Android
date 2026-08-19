@@ -87,6 +87,13 @@ llm:
     executor: "anthropic_fast"
     observer: "anthropic"          # must be a vision profile if vision.enabled
     rca: "anthropic"               # root cause is where reasoning pays off
+    # Closed-loop agents. Both run on EVERY iteration and both ask a narrow,
+    # well-bounded question ("which way do I move?", "was that valid
+    # progress?"), so the cheap model is the right call - the expensive one
+    # earns its keep on open-ended diagnosis, not on repetition.
+    decision: "anthropic_fast"
+    verifier: "anthropic_fast"
+
 
 # ---------------------------------------------------------------------------
 # HARDWARE / TRANSPORT
@@ -194,15 +201,144 @@ logs:
 # EXECUTION
 # ---------------------------------------------------------------------------
 execution:
-  # plan     = follow the PlannerAgent's steps, observing after each
-  # reactive = ReAct loop; the model picks the next tool from what it SEES.
-  #            Slower and costlier, but it can recover from an unexpected UI.
-  # adaptive = plan first, switch to reactive only when a step's expectation
-  #            is not met. Best default.
-  mode: "adaptive"
-  max_steps: 60                    # hard stop; guards against loops
+  # closed_loop = observe -> decide ONE action -> execute -> observe -> verify.
+  #               The DEFAULT and the correct architecture. The next action is
+  #               chosen from the screen in front of it, so the number of
+  #               presses needed to cross a menu is an OUTPUT of watching the
+  #               highlight rather than a number guessed in advance.
+  # plan        = follow a pre-written PlannerAgent step list, observing after
+  #               each. LEGACY.
+  # adaptive    = plan first, divert to RCA when a step's expectation is not
+  #               met. LEGACY.
+  #
+  # Why the legacy modes still exist: they are the rollback path for one
+  # release. If a closed-loop run regresses, `mode: adaptive` restores the old
+  # behaviour with a single edit instead of a git bisect. They are expected to
+  # be removed once a green run is on record.
+  mode: "closed_loop"
+  max_steps: 60                    # hard stop for plan mode; guards against loops
   max_reactive_iterations: 12
   step_timeout_seconds: 45.0
+
+  # -------------------------------------------------------------------------
+  # CLOSED LOOP
+  # -------------------------------------------------------------------------
+  # How many observe/decide/act/verify passes before giving up. This replaces
+  # `max_steps` as the real bound in closed-loop mode: there is no step list to
+  # count, only iterations of the cycle. 40 is generous for a launch flow -
+  # navigating a rail plus a game boot is typically 12-20.
+  max_iterations: 40
+
+  closed_loop:
+    # -----------------------------------------------------------------------
+    # THE SIGNAL HANDSHAKE - a browser protocol step, not a convenience
+    #
+    # The W3C Gamepad API hides a gamepad from a page until the pad sends a
+    # button event:
+    #
+    #     navigator.getGamepads() returns nothing for a pad that has not yet
+    #     reported a button press.
+    #
+    # It is an anti-fingerprinting rule and it applies to every browser, so a
+    # FRESHLY LOADED xCloud page cannot see the Leonardo no matter how correctly
+    # it is wired. Until one button report arrives, every input is discarded by
+    # the PAGE - not by the board, not by the phone - which produces exactly the
+    # signature of a wiring fault:
+    #
+    #     hardware_ok = true, screen unchanged, nothing ever works
+    #
+    # So the run performs guide x2 (visible: it opens the xCloud overlay) then B
+    # (puts the UI back), after EVERY page load. The sequence itself lives in
+    # ../config/controls.yaml as `special_actions.signal_handshake`, because it
+    # belongs to the rig rather than to the framework.
+    # -----------------------------------------------------------------------
+    handshake:
+      # Turning this off is almost always wrong. The only legitimate case is a
+      # rig where something else has already announced the pad to the page.
+      enabled: true
+
+      # How many times to try before giving up. Each attempt is guide x2 -> look
+      # -> (if nothing) one more guide -> look -> B, so 2 attempts already means
+      # up to six Guide presses. Beyond that a failure is a FINDING, not
+      # something to keep hammering.
+      max_attempts: 2
+
+      # Used only if controls.yaml has no `signal_handshake` action. Two because
+      # the first press is commonly consumed by the page taking focus rather
+      # than by the pad announcing itself.
+      guide_presses: 2
+
+      # Confirm the overlay actually appeared (frame diff or OCR) instead of
+      # assuming the presses landed.
+      #
+      # This is worth the ~2s and 2 screenshots: controls.yaml explicitly flags
+      # `guide` as UNVERIFIED because some Android builds intercept the HID Home
+      # usage before the app sees it. If that happens on your device, a
+      # fire-and-forget handshake leaves the run blind and every later step
+      # looks like a hardware fault. Verified, the run says so immediately.
+      #
+      # Without adb there is nothing to look at, and the run degrades to
+      # fire-and-forget - reported honestly as an assumption, not a finding.
+      verify: true
+
+    # Cheap recoveries (wait for a loading screen, dismiss an overlay, look
+
+    # again) per goal before giving up and running a full root-cause analysis.
+    #
+    # Deliberately small. Retrying indefinitely is how a rig produces a hundred
+    # identical failures instead of one useful diagnosis: attempt, verify,
+    # recover, attempt, verify, then stop and say what happened.
+    max_recovery_attempts: 2
+
+    # How many observations may produce NO SENSOR DATA AT ALL before the loop
+    # gives up and says so.
+    #
+    # Without adb there are no screenshots, so every screen classifies as
+    # UNKNOWN at 0% confidence, so the decision agent correctly answers OBSERVE
+    # - forever. Every individual decision is right and the aggregate is a
+    # livelock: `max_iterations` stops it eventually, but eventually is ~30
+    # minutes, and the conclusion available after the third pass is the same one
+    # available after the fortieth.
+    #
+    # The bar is deliberately "no sensors used", not "low confidence". A screen
+    # that OCR could read but nothing could classify is a real perception
+    # problem worth looking at again; a screen nobody photographed is a rig
+    # problem, and the honest thing is to stop and name it.
+    max_blind_iterations: 3
+
+
+    # Navigation is ONE press per observation, always. Exposed here to document
+    # the invariant rather than to invite raising it - the schema constrains
+    # `Action.times` to 1, so a larger number here would be ignored. Pressing
+    # twice without looking is what makes a run interact with the wrong screen.
+    max_consecutive_navigation: 1
+
+    # -----------------------------------------------------------------------
+    # PERCEPTION CONFIDENCE BANDS
+    #
+    # These decide when the cheap tier is trusted and when a vision-LLM call is
+    # worth paying for. The previous pipeline had no such decision: it computed
+    # OCR and a frame diff and then called a vision model anyway, on BOTH the
+    # glance and the settle of every acting step - two calls before anything
+    # asked whether they were needed. That is the main reason a 10-step run
+    # cost 517 seconds and 32 LLM calls.
+    # -----------------------------------------------------------------------
+    confidence:
+      # At or above this, act on the state as read.
+      act: 0.85
+      # Below this, escalate to the vision LLM / observe again. Between the two,
+      # the state is used but treated as soft evidence.
+      reobserve: 0.60
+
+    perception:
+      # Try OCR + frame diff + geometry before any model call.
+      fast_first: true
+      # Escalate to the vision LLM when the fast tier lands below `reobserve`.
+      # Set false on a metered key: the run still works, but an unfamiliar
+      # screen will stay UNKNOWN and the loop will spend iterations observing
+      # rather than resolving it.
+      vision_on_low_confidence: true
+
   # DEPRECATED, kept so an old config still runs. Superseded by execution.settle
   # below, which replaced this single number with a per-action-kind pair. It is
   # no longer read by the executor.

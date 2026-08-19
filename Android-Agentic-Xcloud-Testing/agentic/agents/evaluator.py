@@ -27,7 +27,8 @@ insufficient.
 from __future__ import annotations
 
 from ..schemas import (CriterionResult, Evaluation, ScenarioSpec, StepResult,
-                       Verdict)
+                       TransitionClass, Verdict)
+
 from ..state import GraphState
 from .base import Agent
 
@@ -218,7 +219,58 @@ class EvaluatorAgent(Agent):
                 f"evidence available")
             ceiling = min(ceiling, Verdict.INCONCLUSIVE, key=self._rank)
 
+        # -- closed-loop rules -----------------------------------------
+        #
+        # Additions, not replacements: every rule above still applies. These
+        # extend the same principle - a claim is capped by the weakest evidence
+        # it rests on - to the transition record the closed loop produces.
+        transitions = [r.transition for r in results if r.transition is not None]
+        if transitions:
+            # A run that never reached its goal state cannot pass, whatever the
+            # individual transitions looked like. Progress is not arrival, and
+            # a sequence of valid INTERMEDIATE steps that stopped short is
+            # precisely the case a model is most tempted to call a success.
+            if not any(t.goal_complete for t in transitions):
+                reasons.append(
+                    "no transition reported the goal state as reached, so the "
+                    "run made progress but did not arrive - that is at best "
+                    "inconclusive, never a pass")
+                ceiling = min(ceiling, Verdict.INCONCLUSIVE, key=self._rank)
+
+            # An UNKNOWN transition is the closed-loop equivalent of
+            # `expectation_met=None`, and it gets the same treatment: it is not
+            # a pass, because nobody could tell what happened.
+            unknown = [t for t in transitions
+                       if t.classification is TransitionClass.UNKNOWN]
+            if unknown:
+                reasons.append(
+                    f"{len(unknown)} of {len(transitions)} transitions could "
+                    f"not be classified from the evidence, so part of the route "
+                    f"taken is unverified")
+                ceiling = min(ceiling, Verdict.INCONCLUSIVE, key=self._rank)
+
+            # Perception confidence is evidence quality. A goal "reached" on a
+            # screen we could barely read is not a demonstrated pass - and this
+            # check is the reason GameState carries its own confidence separately
+            # from the judge's.
+            act_threshold = float(
+                self.s.get("execution.closed_loop.confidence.act", 0.85))
+            final_states = [r.game_state_after for r in results
+                            if r.game_state_after is not None]
+            if final_states:
+                final = final_states[-1]
+                if final.confidence < act_threshold:
+                    reasons.append(
+                        f"the final screen was classified as "
+                        f"{final.screen_type.value} with only "
+                        f"{final.confidence:.0%} perception confidence, below "
+                        f"the {act_threshold:.0%} needed to act on - so what "
+                        f"the run ended on is not firmly established")
+                    ceiling = min(ceiling, Verdict.INCONCLUSIVE,
+                                  key=self._rank)
+
         return ceiling, reasons
+
 
     # -- fallbacks ---------------------------------------------------------
     def _fill_missing_criteria(self, evaluation: Evaluation,
