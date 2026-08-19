@@ -26,10 +26,12 @@ from dataclasses import dataclass, field
 from typing import Annotated, Any, TypedDict
 
 from .llm import LLMFactory
-from .schemas import (Capabilities, EnvironmentReport, Evaluation, Observation,
-                      RootCauseAnalysis, ScenarioSpec, StepResult, TestPlan,
-                      TestReport, Verdict)
+from .schemas import (Action, Capabilities, EnvironmentReport, Evaluation,
+                      GameState, Goal, Observation, RootCauseAnalysis,
+                      ScenarioSpec, StepResult, TestPlan, TestReport,
+                      Transition, Verdict)
 from .settings import Settings
+
 
 
 # ==========================================================================
@@ -48,6 +50,15 @@ class RunContext:
     # the report can quote, and `execution.settle.scale` applies everywhere at
     # once. Defaulted lazily in `__post_init__` so older callers still work.
     timing: Any = None         # timing.Timing
+    # perception.StateBuilder - Observation -> GameState. One instance per run so
+    # its fast/escalated counters describe the whole run, which is how the report
+    # can show that the cheap perception tier is actually saving vision calls
+    # rather than merely existing.
+    state_builder: Any = None
+    # control.ActionValidator - the single fence both the planner and the
+    # decision agent pass through. Constructed once capabilities are known, so
+    # it is filled in by the device node rather than at build time.
+    validator: Any = None
     run_id: str = ""
     started_at: float = field(default_factory=time.time)
     artifacts: list[str] = field(default_factory=list)
@@ -60,6 +71,19 @@ class RunContext:
             # state imports schemas too, so a top-level import would be a cycle.
             from .timing import Timing
             self.timing = Timing(self.settings)
+        if self.state_builder is None:
+            from .perception import StateBuilder
+            self.state_builder = StateBuilder(self.settings, self.vision,
+                                              self.llm)
+        if self.validator is None:
+            # Built with empty capabilities and REPLACED by the device node once
+            # controls.yaml has been read. Defaulting to empty is the safe
+            # direction: an empty capability list rejects every control, so a
+            # wiring bug that skipped discovery fails loudly instead of quietly
+            # sending buttons the rig may not have.
+            from .control import ActionValidator
+            self.validator = ActionValidator(self.settings)
+
 
     def elapsed(self) -> float:
         return time.time() - self.started_at
@@ -92,8 +116,46 @@ class GraphState(TypedDict, total=False):
     root_cause: RootCauseAnalysis
     report: TestReport
 
+    # -- closed-loop state ------------------------------------------------
+    # What the run is trying to reach, in STATES rather than keystrokes. Parsed
+    # from the scenario once, then read by the decision agent and the verifier.
+    goal: Goal
+    # The world as it is now, and as it was before the last action. Two keys
+    # rather than a history lookup because the verifier's whole question is
+    # "before + action -> after", and reconstructing `before` from a list is
+    # how an off-by-one silently compares the wrong pair of screens.
+    game_state: GameState
+    previous_game_state: GameState | None
+    # The action chosen but not yet executed. A separate key so the recovery
+    # agent can pre-empt the decision agent by filling it directly - a recovery
+    # that had to ask the decider for its fix could be handed back the same
+    # action that just failed.
+    pending_action: Action | None
+    # Append-only, like step_results: the decision agent reads the last few to
+    # avoid repeating an action that did nothing.
+    transitions: Annotated[list[Transition], operator.add]
+    last_transition: Transition | None
+    goal_complete: bool
+    iteration: int
+    recovery_attempts: int
+
+    # -- browser handshake ------------------------------------------------
+    # Has this PAGE acknowledged the gamepad yet?
+    #
+    # The W3C Gamepad API hides a pad from a page until the pad sends a button
+    # event, so a freshly loaded page cannot see the controller however well the
+    # hardware is wired. `handshake_done` tracks whether that has been done for
+    # the CURRENT page.
+    #
+    # The launcher sets it False on every launch. That is what makes the
+    # handshake automatic after each page load rather than something a human has
+    # to remember - and it covers a mid-run reload, not just startup.
+    handshake_done: bool
+    handshake_attempts: int
+
+
     # -- control flow -----------------------------------------------------
-    cursor: int                  # index of the next step to execute
+    cursor: int                  # index of the next step to execute (plan mode)
     replans: int
     verdict: Verdict
     halt_reason: str | None
@@ -123,7 +185,22 @@ def new_state(raw_scenario: str, source: str = "<cli>",
         "adaptations": [],
         "agent_trace": [],
         "errors": [],
+        # closed loop
+        "transitions": [],
+        "previous_game_state": None,
+        "pending_action": None,
+        "last_transition": None,
+        "goal_complete": False,
+        "iteration": 0,
+        "recovery_attempts": 0,
+        # False, not True: nothing has been handed shaken yet, and assuming
+        # otherwise is the assumption that produces a run of false silent
+        # failures.
+        "handshake_done": False,
+        "handshake_attempts": 0,
     }
+
+
 
 
 def trace(agent: str, action: str, detail: str = "",

@@ -300,8 +300,14 @@ exit codes: 0 pass, 1 fail, 2 blocked, 3 inconclusive, 4 error
     how = parser.add_argument_group("how to run")
     how.add_argument("--dry-run", action="store_true",
                      help="plan and reason, but never open the serial port")
-    how.add_argument("--mode", choices=["plan", "reactive", "adaptive"],
-                     default=None, help="execution strategy")
+    how.add_argument("--mode",
+                     choices=["closed_loop", "plan", "reactive", "adaptive"],
+                     default=None,
+                     help="execution strategy. closed_loop (the default) "
+                          "observes, decides ONE action, executes, observes "
+                          "and verifies the transition; plan/adaptive walk a "
+                          "pre-written step list and are LEGACY")
+
     how.add_argument("--port", default=None, help="serial port, e.g. COM8")
     how.add_argument("--transport", default=None,
                      help="transport profile from controls.yaml")

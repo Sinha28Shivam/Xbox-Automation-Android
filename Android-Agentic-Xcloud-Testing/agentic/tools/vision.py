@@ -263,19 +263,38 @@ class VisionTool:
             obs.screen_description = described
             sensors.append("vision_llm")
 
-        # -- UI state extraction ------------------------------------------
-        combined = f"{text}\n{described}".lower()
-        if "minecraft" in combined or "dungeons" in combined:
-            obs.target_visible = True
-        if any(term in combined for term in ("play now", "play\n", "starting your game", "details")):
-            if "minecraft" in combined or "dungeons" in combined:
-                obs.detail_page_open = True
-        if any(term in combined for term in ("starting your game", "launching", "connecting to stream", "game stream")):
-            obs.stream_active = True
-        if any(term in combined for term in ("main menu", "press any button", "marketplace", "select hero", "online game", "offline game", "mission select")):
-            obs.main_menu_visible = True
-
+        # -- NO semantic interpretation happens here ----------------------
+        #
+        # This module is a SENSOR. Deciding what the screen MEANS is
+        # perception/state_builder.py's job, and the separation is not
+        # cosmetic - it is a bug fix.
+        #
+        # What used to be here was:
+        #
+        #     combined = f"{text}\n{described}".lower()
+        #     if "minecraft" in combined or "dungeons" in combined:
+        #         obs.target_visible = True
+        #
+        # Three faults in four lines:
+        #
+        # 1. It searched the vision model's own PROSE, so `target_visible`
+        #    became true when the model wrote "there is no Minecraft tile
+        #    visible on this screen". A sensor that reports the opposite of
+        #    what it saw is worse than no sensor.
+        # 2. The flags were independent, so `detail_page_open`,
+        #    `stream_active` and `main_menu_visible` could all be true at
+        #    once. With no single value for "which screen is this", the
+        #    before/action/after comparison that the whole closed loop rests
+        #    on could not even be expressed.
+        # 3. It named a game inside the layer that reads pixels, so adding a
+        #    second title meant editing perception code.
+        #
+        # The `target_*`, `detail_page_open`, `stream_active` and
+        # `main_menu_visible` fields remain on Observation for the legacy plan
+        # path and for report compatibility, but nothing sets them here any
+        # more; GameState.screen_type is the answer to all four questions.
         if self.android and self.android.status.adb_available:
+
             obs.focused_window = self.android.focused_window()
             if obs.focused_window:
                 sensors.append("focused_window")

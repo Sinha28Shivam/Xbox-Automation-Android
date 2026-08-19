@@ -347,10 +347,31 @@ class PlannerAgent(Agent):
         # declared way to prove input arrives.
         probe_macro = next((m for m in caps.macros if "nav" in m.lower()
                             or "test" in m.lower()), None)
-        is_minecraft = ("minecraft" in scenario.title.lower()
-                        or "minecraft" in scenario.intent.lower())
+
+        # NOTE: the hardcoded Minecraft Dungeons ladder that used to be here has
+        # been REMOVED - about sixty lines of it.
+        #
+        # It was a fixed sequence of presses and waits keyed off
+        # `"minecraft" in scenario.title.lower()`, and it embedded the exact
+        # false assumption that caused the failure this whole rework addresses:
+        #
+        #     expectation="Minecraft Dungeons detail page opens with a Play button"
+        #
+        # Pressing A on a focused tile may legitimately open a detail page OR
+        # hand straight off to fullscreen and start loading. The hardcoded ladder
+        # admitted only the first, so a perfectly good direct launch was recorded
+        # as a failure.
+        #
+        # Two things replace it. `execution.mode: closed_loop` derives the route
+        # from what is actually on screen, and this fallback stays what a
+        # no-LLM fallback should be: an honest capability probe that proves input
+        # reaches xCloud, labelled as such, with no pretence of having tested the
+        # scenario as written. Special-casing one game in the offline path was
+        # never a fallback - it was a second, less visible implementation of the
+        # test, which is exactly how the two drift apart.
 
         if caps.can_send_input:
+
             # After PWA launch & stabilization: press Guide 3 times to wake controller & verify signal, then dismiss with B
             guide_btn = next((b for b in ("guide", "home") if b in caps.buttons), None)
             if guide_btn and "b" in caps.buttons:
@@ -361,69 +382,8 @@ class PlannerAgent(Agent):
                     intent="dismiss Guide overlay with B button to return back to menu screen",
                     expectation="screen returns to main xCloud menu")
 
-            if is_minecraft:
-                # 1. Wake up controller / clear "connect a controller" notice
-                add(kind=ActionKind.PRESS, target="a", optional=True,
-                    intent="wake up the gamepad and clear xCloud's 'connect a controller' notice",
-                    expectation="")
-                # 2. Select the Minecraft Dungeons tile directly from the starting screen
-                add(kind=ActionKind.PRESS, target="a",
-                    intent="press A to select the focused Minecraft Dungeons tile on the starting screen",
-                    expectation="Minecraft Dungeons detail page opens with a Play button",
-                    criterion_ids=[c.id for c in scenario.acceptance_criteria if "reach" in c.statement.lower() or "focus" in c.statement.lower() or "detail" in c.statement.lower()])
-                # 3. Wait for detail page to render
-                add(kind=ActionKind.WAIT,
-                    seconds=caps.timing.get("screen_load_wait", 3.0),
-                    intent="wait for the Minecraft Dungeons detail page to render",
-                    observe_after=False)
-                add(kind=ActionKind.OBSERVE,
-                    intent="verify the Minecraft Dungeons detail page is open and shows Play button",
-                    expectation="the detail page shows Play / Play now without a controller warning",
-                    criterion_ids=[c.id for c in scenario.acceptance_criteria if "detail" in c.statement.lower() or "play" in c.statement.lower()])
-                # 4. Activate Play to launch the stream
-                add(kind=ActionKind.PRESS, target="a",
-                    intent="press A to activate Play and start the game stream",
-                    expectation="a loading / 'starting your game' state appears",
-                    criterion_ids=[c.id for c in scenario.acceptance_criteria if "launch" in c.statement.lower() or "stream" in c.statement.lower()])
-                add(kind=ActionKind.WAIT,
-                    seconds=caps.timing.get("app_launch_wait", 8.0) + caps.timing.get("stream_start_wait", 25.0),
-                    intent="wait for game stream to connect and stream video to appear",
-                    observe_after=False)
-                add(kind=ActionKind.OBSERVE,
-                    intent="verify live Minecraft Dungeons stream video is running",
-                    expectation="live game video is on screen",
-                    criterion_ids=[c.id for c in scenario.acceptance_criteria if "video" in c.statement.lower() or "stream" in c.statement.lower()])
-                # 5. Wait for game boot
-                add(kind=ActionKind.WAIT,
-                    seconds=caps.timing.get("game_boot_wait", 45.0),
-                    intent="wait for game boot, splash screens, and title screen",
-                    observe_after=False)
-                add(kind=ActionKind.PRESS, target="a", optional=True,
-                    intent="press A to pass 'press any button' title prompt if present",
-                    expectation="")
-                # 6. Verify main menu
-                add(kind=ActionKind.OBSERVE,
-                    intent="verify in-game main menu is reached",
-                    expectation="Minecraft Dungeons main menu is visible with options (Play, Options)",
-                    criterion_ids=[c.id for c in scenario.acceptance_criteria if "menu" in c.statement.lower()])
-                add(kind=ActionKind.RESET,
-                    intent="release all inputs so none outlive the run",
-                    expectation="", observe_after=False)
-                return TestPlan(
-                    steps=steps,
-                    strategy=(
-                        "Pure Gamepad Navigation: select Minecraft Dungeons directly from the "
-                        "starting screen with the physical gamepad, open its detail page, "
-                        "press Play with gamepad A, wait out the stream connection and game boot, "
-                        "and verify the in-game main menu. No search or ADB typing required."),
-                    assumptions=[
-                        "Minecraft Dungeons is available on the starting/home screen",
-                        "gamepad A selects the focused tile and activates Play",
-                        "all actions are executed purely via physical Leonardo USB HID gamepad",
-                    ],
-                )
-
             first = next((b for b in ("a", "menu") if b in caps.buttons), None)
+
             if first:
                 add(kind=ActionKind.PRESS, target=first, optional=True,
                     intent="one harmless press so xCloud stops showing "

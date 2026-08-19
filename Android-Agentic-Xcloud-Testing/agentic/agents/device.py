@@ -219,49 +219,26 @@ class DeviceAgent(Agent):
             lines.append("WARNINGS: " + " | ".join(report.warnings))
         return "\n".join(lines)
 
-    def _verify_guide_handshake(self, report: EnvironmentReport) -> None:
-        """Globally verify that the mobile device is accepting gamepad signals:
-        1. Press Guide button 2 or 3 times.
-        2. Verify that the Guide screen/overlay appears.
-        3. Dismiss Guide screen with B (or Guide) to return to menu screen.
-        """
-        import time
-        from ..logbook import log
+    # NOTE: `_verify_guide_handshake` used to live here and has been REMOVED.
+    #
+    # It was ~45 lines that pressed Guide twice, looked for the overlay, and
+    # pressed B - and it was never called by anything, so it had never once run.
+    # Two things were wrong with it beyond that:
+    #
+    # 1. WRONG PLACE. DeviceAgent runs FIRST, before the PWA is launched. A
+    #    handshake performed here is thrown away by the page load that follows,
+    #    because the W3C Gamepad API hides the pad from each new page until the
+    #    pad sends a button event. It has to happen AFTER the browser is up.
+    #
+    # 2. WRONG VERDICT. It set `guide_signal_verified = True` on BOTH branches,
+    #    including the one where nothing was detected. A check that cannot say
+    #    no is not a check, and this project's whole discipline is built on
+    #    checks capable of saying no.
+    #
+    # It now lives in `agents/handshake.py` as a graph node that runs after
+    # `launch`, repeats after every page load, and reports honestly when the
+    # browser never acknowledged the pad. This agent still OWNS the
+    # `guide_signal_verified` / `guide_verification_notes` fields on
+    # EnvironmentReport - the handshake agent fills them in.
 
-        pad = self.ctx.pad.pad
-        vision = self.ctx.vision
-        if pad is None:
-            return
 
-        log.hw("verifying mobile accepts gamepad signal (Guide button handshake)...", indent=0)
-
-        pre_frame = None
-        if vision and vision.can_screenshot:
-            pre_frame, _ = vision.capture(self.ctx.run_id, "pre_guide_handshake")
-
-        # Press Guide 2-3 times to wake controller and trigger Guide overlay
-        pad.press_times("guide", 2, interval=0.35)
-        time.sleep(1.2)
-
-        guide_detected = False
-        if vision and vision.can_screenshot:
-            post_frame, _ = vision.capture(self.ctx.run_id, "guide_screen_active")
-            ratio = vision.diff(post_frame, pre_frame)
-            ocr_text = (vision.ocr(post_frame) or "").lower()
-            if (ratio is not None and ratio >= 0.01) or any(
-                    k in ocr_text for k in ("guide", "xbox", "home", "settings", "audio", "friends", "sign in", "quit")):
-                guide_detected = True
-
-        if guide_detected:
-            report.guide_signal_verified = True
-            report.guide_verification_notes = "Mobile accepted Guide signal and Guide overlay was verified."
-            log.ok("GUIDE SIGNAL VERIFIED: Mobile device is actively responding to gamepad signals!", indent=1)
-        else:
-            report.guide_signal_verified = True
-            report.guide_verification_notes = "Guide handshake sequence sent (2 presses)."
-            log.ok("Guide handshake sent to prime the mobile gamepad interface.", indent=1)
-
-        # Press B (or Guide) to dismiss the Guide overlay and return back to the menu screen
-        pad.press("b")
-        time.sleep(0.8)
-        log.hw("dismissed Guide overlay with B -> returned to menu screen", indent=1)
