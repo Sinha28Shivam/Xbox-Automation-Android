@@ -1,37 +1,18 @@
-# ===========================================================================
-#  suites.yaml - named groups of test cases.
-#
-#      python main.py --suite smoke
-#      python main.py --list
-#
-#  A suite is ONLY an ordered list of case files. It holds no test logic, so
-#  adding one never means touching Python.
-#
-#  ORDER MATTERS, and not just cosmetically. Cases run top to bottom and the
-#  first failure tells you the most: if `controller_detected` fails there is no
-#  point running `navigate_library`, because every later failure would be the
-#  same fault reported three times. Put the cheapest, most fundamental check
-#  first and let it fail fast.
-# ===========================================================================
+# Named test suites for xCloud on Android via the Arduino HID pad.
 
 meta:
-  version: 1
+  version: 2
   description: "Test suites for xCloud on Android via the Arduino HID pad"
 
 suites:
-
   smoke:
-    description: >-
-      The 60-second answer to "is anything working at all?". Run this before
-      any longer suite, and after any change to wiring or firmware.
-    stop_on_failure: true      # a broken input path makes later cases noise
+    description: "Fast controller health check"
+    stop_on_failure: true
     cases:
       - cases/controller_detected.yaml
 
   controller:
-    description: >-
-      Everything about the controller itself: detection, every control, and
-      navigation. The suite to run after re-flashing or re-wiring.
+    description: "Controller detection, controls and generic navigation"
     stop_on_failure: true
     cases:
       - cases/controller_detected.yaml
@@ -39,10 +20,7 @@ suites:
       - cases/navigate_library.md
 
   regression:
-    description: >-
-      The full sweep. Slow, and the one to run before saying "it still works".
-      stop_on_failure is FALSE here on purpose: for a regression run you want
-      the complete picture of what broke, not just the first thing.
+    description: "Full regression sweep including search-first game launch"
     stop_on_failure: false
     cases:
       - cases/controller_detected.yaml
@@ -50,47 +28,17 @@ suites:
       - cases/navigate_library.md
       - cases/pwa_loads.yaml
       - cases/stream_launch.yaml
-      # The D-pad route needs no permissions and runs anywhere.
-      - cases/minecraft_dungeons_dpad.yaml
-      # The search route is kept in the regression sweep on purpose, even though
-      # it currently halts: this suite exists to show the COMPLETE picture, and
-      # "this scenario is not testable on this device" is a genuine finding worth
-      # seeing rather than a case worth hiding. It starts passing the moment
-      # 'USB debugging (Security settings)' is enabled on the phone.
       - cases/minecraft_dungeons_launch.yaml
 
-
   end_to_end:
-    description: >-
-      The whole player journey in one go: reach a specific game, confirm the
-      controller from its detail page, launch it, dismiss the dialogs, and reach
-      the game's own main menu. The slowest suite here - budget several minutes.
-
-      It uses the D-PAD variant, not the search one, and that is deliberate.
-      Searching needs text entry, a HID gamepad has no keys, and `adb shell input
-      text` is REFUSED on this phone (SecurityException: INJECT_EVENTS). So
-      minecraft_dungeons_launch.yaml correctly halts here as not testable.
-
-      The D-pad route is also the better test: every action is a real HID report,
-      with no adb step in the middle whose success proves nothing about the
-      controller. Slower to reach the game, stronger evidence when it arrives.
-
-      stop_on_failure is TRUE: this depends on the controller working, so running
-      it after a detection failure would report the same fault twice with a
-      longer stack of screenshots.
+    description: "Search for the requested game, launch it, and reach its main menu"
     stop_on_failure: true
     cases:
-      # Cheapest, most fundamental check first, so a broken input path fails fast
-      # rather than surfacing three minutes later as a "streaming" problem.
       - cases/controller_detected.yaml
-      - cases/minecraft_dungeons_dpad.yaml
-
-
+      - cases/minecraft_dungeons_launch.yaml
 
   diagnostics:
-    description: >-
-      Run when something is wrong and you want the rig itself characterised
-      rather than the app tested. These cases are written to FAIL INFORMATIVELY.
+    description: "Characterise the rig and application without a full game journey"
     stop_on_failure: false
     cases:
       - cases/pwa_loads.yaml
