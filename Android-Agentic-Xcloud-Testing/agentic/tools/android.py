@@ -171,6 +171,41 @@ class AndroidTool:
         self.status.webapks_found = sorted(p for p in packages if marker in p.lower())
         self.status.chosen_launcher = self.status.browsers_found[0] if self.status.browsers_found else None
 
+    # -- UI extraction: ground truth, not a guess -------------------------
+    #
+    # Mirrors the pattern used by comparable agentic game-QA harnesses
+    # (dump the Android accessibility tree, then parse it) rather than
+    # inferring "what is focused" from a vision model's prose or from how
+    # many D-pad presses have been sent. `uiautomator dump` asks the OS
+    # itself which node currently carries focus/selection - it can say NO
+    # (empty dump, node not found) exactly like every other sensor here.
+    #
+    # CAVEAT, logged rather than hidden: xCloud is a Chrome PWA. Native
+    # `uiautomator` reliably sees the Chrome shell (address bar, tabs,
+    # native dialogs) but may NOT see individual web page elements unless
+    # Chrome's own accessibility tree is exposing them. When that is true
+    # this call still returns a dump - callers must not assume an empty
+    # tile list means "nothing is on screen"; it may mean "the browser
+    # isn't exposing the page to the accessibility API". That distinction
+    # is exactly the kind of honest degradation this whole module practises.
+    def ui_dump(self, timeout: float = 15.0) -> tuple[bool, str]:
+        """Dump the current on-screen view/accessibility hierarchy as XML.
+
+        Two-step dump-to-device-then-cat, the same sequence used by every
+        other adb-based UI harness, because `uiautomator dump` writes to a
+        file on the device rather than stdout.
+        """
+        remote = "/sdcard/window_dump.xml"
+        ok, out = self.shell(f"uiautomator dump {remote}", timeout=timeout)
+        if not ok:
+            return False, f"uiautomator dump failed: {out}"
+        if "ERROR" in out or "null root node" in out.lower():
+            return False, f"uiautomator dump reported an error: {out.strip()}"
+        ok, xml = self.shell(f"cat {remote}", timeout=timeout)
+        if not ok or not xml.strip():
+            return False, f"could not read {remote}: {xml}"
+        return True, xml
+
     def focused_window(self) -> str | None:
         ok, out = self.shell("dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'", timeout=15.0)
         if not ok or not out.strip():

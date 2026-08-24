@@ -163,22 +163,35 @@ class DecisionAgent(Agent):
                               expected_states=[ScreenType.FULLSCREEN_TRANSITION, ScreenType.GAME_LOADING,
                                                ScreenType.GAME_CONNECTING, ScreenType.LIVE_GAME_STREAM]), "activate Play after search"
 
-            actions_since = self._actions_since_search_text(state)
-            if actions_since == 0:
-                # Move focus down from the search input bar to the search results row
+            # Focus has not yet been confirmed by extraction (gs.target_focused
+            # is False - checked above). NEVER press A here on the assumption
+            # that a prior DOWN press moved focus onto the result tile: that
+            # assumption is exactly what produced the silent-failure run.
+            # DOWN's only observable effect was often the on-screen keyboard
+            # closing (a big transient glance, ~0% settled change), not focus
+            # moving onto a game tile, and `target_focused` stayed False the
+            # whole time while A was pressed three times into nothing.
+            #
+            # So instead: nudge focus towards the result row/tile and
+            # re-observe. `target_focused` is only ever set from a
+            # ground-truth extraction (uiautomator dump `focused`/`selected`
+            # node, see agentic/tools/vision.py::ui_extract) or, as a
+            # last-resort degraded fallback, an explicit vision-LLM
+            # TARGET_FOCUSED answer - never from counting presses. Bounded by
+            # `search_nav_budget` so a platform that never exposes focus
+            # (e.g. web content invisible to uiautomator) falls through to
+            # normal navigation/observe instead of looping forever.
+            nudges = self._actions_since_search_text(state)
+            budget = int(self.s.get("execution.closed_loop.search_nav_budget", 6))
+            if nudges < budget:
                 direction = "down" if "down" in buttons else self._choose_direction(buttons)
                 if direction:
                     return Action(type=ActionType.PRESS, control=direction,
-                                  rationale=f"search text {goal.target!r} was typed; move focus down to result tile",
+                                  rationale=(f"search text {goal.target!r} was typed and extraction has not "
+                                             f"yet confirmed focus on the result tile (focus="
+                                             f"{gs.focus.element!r}); nudge focus with {direction} and re-observe"),
                                   expected_states=[ScreenType.GAME_FOCUSED, ScreenType.XCLOUD_HOME,
                                                    ScreenType.XCLOUD_LIBRARY, ScreenType.GAME_DETAIL]), "focus search result"
-            elif "a" in buttons:
-                # Focus is on the search result; select it with A
-                return Action(type=ActionType.PRESS, control="a",
-                              rationale=f"search result for {goal.target!r} is active; select it with physical A",
-                              expected_states=[ScreenType.GAME_DETAIL, ScreenType.FULLSCREEN_TRANSITION,
-                                               ScreenType.GAME_LOADING, ScreenType.GAME_CONNECTING,
-                                               ScreenType.LIVE_GAME_STREAM, ScreenType.GAME_SPLASH]), "select search result"
 
             return self._navigation_action(gs, goal, caps, state)
 

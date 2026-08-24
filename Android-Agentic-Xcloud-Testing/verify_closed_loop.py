@@ -25,8 +25,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agentic.control import ActionValidator                    # noqa: E402
 from agentic.perception import StateBuilder                    # noqa: E402
 from agentic.schemas import (Action, ActionType, Capabilities,  # noqa: E402
-                             FailureClass, GameState, Goal, Observation,
-                             ScreenType, TransitionClass, WAITING_STATES)
+                             FailureClass, Focus, GameState, Goal, Observation,
+                             ScreenType, Transition, TransitionClass,
+                             WAITING_STATES)
 from agentic.settings import Settings                          # noqa: E402
 
 PASS, FAIL = "PASS", "FAIL"
@@ -279,6 +280,120 @@ for mode in ("closed_loop", "adaptive"):
         check(f"graph compiles in mode={mode}", False,
               f"{type(exc).__name__}: {exc}")
 
+
+# ==========================================================================
+print("\n7. THE MINECRAFT DUNGEONS RUN 20260824-165012-066a69 REGRESSION")
+# ==========================================================================
+# Reproduces the exact failure signature of that run: search text was sent,
+# ONE down press was dispatched (its only visible effect being the on-screen
+# keyboard closing - a big transient glance, ~0% settled change), and
+# `target_focused` never became true because no sensor ever reported a
+# focused tile. The decision agent used to assume "one DOWN press happened"
+# was proof enough and pressed A three times into nothing. It must not do
+# that any more: it must keep nudging (bounded by search_nav_budget) until
+# extraction actually confirms focus, and never fire A on an unconfirmed
+# guess.
+search_goal = Goal(description="search for Minecraft Dungeons", target="Minecraft Dungeons",
+                   success_states=[ScreenType.GAME_MAIN_MENU])
+scenario_stub = ScenarioSpec(
+    title="Search for Minecraft Dungeons and reach its main menu",
+    intent="search-first launch scenario")
+
+
+def _tr(control: str) -> Transition:
+    return Transition(action=Action(type=ActionType.PRESS, control=control))
+
+
+# Unfocused state: target text visible (from OCR/search results) but NO
+# sensor ever reported a focused tile - exactly what iter04-06 looked like.
+unfocused_after_search = GameState(
+    screen_type=ScreenType.XCLOUD_LIBRARY, confidence=0.95,
+    target_visible=True, target_focused=False,
+    focus=Focus(element=None))
+
+state_one_down_sent: GraphState = {
+    "scenario": scenario_stub,
+    "transitions": [_tr("y"), _tr("__adb_text__"), _tr("down")],
+}
+action, why = decider._search_action(unfocused_after_search, search_goal, caps,
+                                     state_one_down_sent,
+                                     {"a", "b", "down", "up", "left", "right", "y"})
+check("after ONE down press with focus still NOT confirmed, the decision is "
+      "NOT to press A",
+      action is not None and not (action.type is ActionType.PRESS and action.control == "a"),
+      f"got {action.describe() if action else None} - {why}")
+check("...instead it nudges focus again (or falls back to plain navigation), "
+      "never firing blind on an unconfirmed guess",
+      action is not None and action.type is ActionType.PRESS
+      and action.control in ("down", "right", "left", "up"),
+      f"got {action.describe() if action else None} - {why}")
+
+# Budget exhausted: search_nav_budget nudges have already been sent and focus
+# is STILL not confirmed. The agent must give up on the search-specific route
+# (fall through to plain navigation / eventually OBSERVE+RCA) rather than
+# loop forever or fire A anyway.
+budget = int(settings.get("execution.closed_loop.search_nav_budget", 6))
+state_budget_exhausted: GraphState = {
+    "scenario": scenario_stub,
+    "transitions": [_tr("y"), _tr("__adb_text__")] + [_tr("down")] * (budget + 1),
+}
+action2, why2 = decider._search_action(unfocused_after_search, search_goal, caps,
+                                       state_budget_exhausted,
+                                       {"a", "b", "down", "up", "left", "right", "y"})
+check("once the nudge budget is exhausted with focus still unconfirmed, A is "
+      "still never fired blindly",
+      action2 is None or not (action2.type is ActionType.PRESS and action2.control == "a"),
+      f"got {action2.describe() if action2 else None} - {why2}")
+
+# Now confirm the positive path still works: once extraction (ui_extract via
+# the fast tier's obs.focused_tile, or a degraded vision-LLM fallback) DOES
+# report the target focused, A must fire immediately - the fix must not have
+# made the agent overly cautious on the happy path.
+focused_after_search = GameState(
+    screen_type=ScreenType.XCLOUD_LIBRARY, confidence=0.95,
+    target_visible=True, target_focused=True,
+    focus=Focus(element="Minecraft Dungeons"))
+action3, why3 = decider._search_action(focused_after_search, search_goal, caps,
+                                       state_one_down_sent,
+                                       {"a", "b", "down", "up", "left", "right", "y"})
+check("once extraction CONFIRMS the target is focused, A fires immediately",
+      action3 is not None and action3.type is ActionType.PRESS and action3.control == "a",
+      f"got {action3.describe() if action3 else None} - {why3}")
+
+# The extraction plumbing itself: a vision LLM's own TARGET_FOCUSED guess
+# must never override a ground-truth ui_dump/OCR-position sensor. Build a
+# StateBuilder with a fake vision tool that WRONGLY claims TARGET_FOCUSED:
+# yes, and prove the ground-truth path (obs.focused_tile set, but pointing
+# at something OTHER than the target) wins over that guess.
+class _FakeVision:
+    def describe(self, screenshot_path, question):
+        return ("SCREEN: xcloud_library\n"
+                "FOCUS: Search field\n"
+                "TARGET_VISIBLE: yes\n"
+                "TARGET_FOCUSED: yes\n"          # the LLM's WRONG guess
+                "LOADING: no\nOVERLAY: no\nERROR: no\n"
+                "CONFIDENCE: 0.9\nWHY: it looks focused")
+
+
+grounded_builder = StateBuilder(settings, vision=_FakeVision())
+grounded_obs = Observation(
+    screen_text="Minecraft Dungeons", focused_tile="Search field",
+    screenshot_path="fake.png", sensors_used=["ocr", "ui_dump", "vision_llm"])
+grounded_state = grounded_builder.build(grounded_obs, goal=search_goal)
+check("a ground-truth focused_tile that does NOT match the target keeps "
+      "target_focused False, even when the vision LLM guesses TARGET_FOCUSED: yes",
+      grounded_state.target_focused is False,
+      f"got target_focused={grounded_state.target_focused} "
+      f"(focused_tile={grounded_obs.focused_tile!r})")
+
+# And the inverse: when ui_dump reports the TARGET ITSELF as focused, that
+# ground truth is honoured even though it never asked the vision LLM.
+matching_obs = Observation(
+    screen_text="Minecraft Dungeons", focused_tile="Minecraft Dungeons",
+    sensors_used=["ocr", "ui_dump"])
+matching_state = builder.build(matching_obs, goal=search_goal)
+check("ui_dump reporting the TARGET as the focused node sets target_focused True",
+      matching_state.target_focused is True)
 
 # ==========================================================================
 failed = [r for r in results if r[0] == FAIL]
