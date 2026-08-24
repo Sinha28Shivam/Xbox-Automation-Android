@@ -116,7 +116,7 @@ hardware:
 # ---------------------------------------------------------------------------
 android:
   adb_path: "adb"                  # or an absolute path
-  serial: null                     # null = the single attached device
+  serial: "192.168.31.161:36153"                     # null = the single attached device
   required: false                  # true = abort the run when adb is missing
 
   # xCloud is a PWA, NOT an installed app. There is no package to launch and
