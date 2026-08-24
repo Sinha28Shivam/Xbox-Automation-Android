@@ -57,8 +57,24 @@ class ObserverAgent(Agent):
             observation, goal=goal, previous=previous)
 
         log.see(f"state: {game_state.summary()}")
-        for note in game_state.evidence[:3]:
-            log.debug(f"because: {note}", indent=2)
+        # Full extracted evidence, every iteration, at INFO level so it is
+        # always visible (not gated behind logs.level=debug). The decision
+        # that follows this observation must be traceable back to exactly
+        # what was extracted, not to a summary that dropped a disconfirming
+        # detail - this is the "extract and log everything, then decide
+        # from that" behaviour requested for this rig.
+        for note in game_state.evidence:
+            log.see(f"because: {note}", indent=2)
+        if observation.screen_text:
+            log.see(f"OCR text: {observation.screen_text[:500]}", indent=2)
+        if observation.screen_description:
+            log.see(f"vision description: {observation.screen_description[:500]}",
+                    indent=2)
+        log.see(
+            f"extraction: focused_tile={observation.focused_tile!r} "
+            f"target_visible={game_state.target_visible} "
+            f"target_focused={game_state.target_focused}",
+            indent=2)
 
         return {
             # The state we are replacing becomes the "before" for whatever

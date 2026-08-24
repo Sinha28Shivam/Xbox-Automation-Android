@@ -463,8 +463,31 @@ class StateBuilder:
             state.focus = Focus(element=focus_text, confidence=0.8)
 
         yes = lambda key: parsed.get(key, "").strip().lower().startswith("y")  # noqa: E731
-        state.target_visible = yes("target_visible")
-        state.target_focused = yes("target_focused")
+        state.target_visible = yes("target_visible") or fast.target_visible
+
+        # target_focused is GROUND-TRUTH ONLY when the fast tier already had
+        # a ground-truth answer (obs.focused_tile was set by ui_extract()).
+        # The vision LLM's own TARGET_FOCUSED guess is used ONLY as a
+        # last-resort degraded fallback when no sensor reported focus at
+        # all - it must never be allowed to overrule or invent a "focused"
+        # claim that a real accessibility-tree/OCR-position sensor did not
+        # make. This is exactly the gap that let a vision model's opinion
+        # about a screenshot substitute for evidence and produced blind A
+        # presses on an unfocused search result.
+        if obs.focused_tile:
+            state.target_focused = fast.target_focused
+            state.evidence.append(
+                "target_focused kept from ground-truth extraction "
+                f"(focused_tile={obs.focused_tile!r}); the vision LLM's own "
+                "guess is not used to override a real sensor")
+        else:
+            state.target_focused = yes("target_focused")
+            if state.target_focused:
+                state.evidence.append(
+                    "target_focused is a DEGRADED vision-LLM guess - no "
+                    "ui_dump/OCR-position sensor reported focus, so this is "
+                    "the weakest form of this claim and should not gate an "
+                    "irreversible action like a launch A-press on its own")
         state.loading = yes("loading") or screen in (
             ScreenType.GAME_LOADING, ScreenType.GAME_CONNECTING)
         state.overlay_present = yes("overlay")
@@ -485,12 +508,15 @@ class StateBuilder:
         # the confidence bands meaningful.
         state.confidence = round(max(0.0, min(confidence, 0.95)), 3)
 
+        # Extend rather than overwrite: the ground-truth-vs-degraded-guess
+        # note recorded above for target_focused must survive, not be
+        # silently replaced by the screen-classification evidence.
         state.evidence = [
             f"vision LLM classified this as {screen.value}: "
             + parsed.get("why", "no reason given"),
             f"the fast text pass had guessed {fast.screen_type.value} at "
             f"{fast.confidence:.0%} confidence",
-        ]
+        ] + state.evidence
         return state
 
     @staticmethod

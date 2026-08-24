@@ -313,6 +313,16 @@ execution:
     # twice without looking is what makes a run interact with the wrong screen.
     max_consecutive_navigation: 1
 
+    # After search text is typed, how many focus-nudge presses (DOWN, etc.)
+    # the search flow will send while waiting for EXTRACTION (uiautomator
+    # dump `focused`/`selected` node, never a press count or a vision-model
+    # guess) to confirm the result tile is focused, before giving up on the
+    # search-specific route and falling back to plain navigation. This is
+    # the budget that replaced "assume focus moved after exactly one DOWN
+    # press", which is what produced silent A-press failures when DOWN's
+    # only real effect was the on-screen keyboard closing.
+    search_nav_budget: 6
+
     # -----------------------------------------------------------------------
     # PERCEPTION CONFIDENCE BANDS
     #

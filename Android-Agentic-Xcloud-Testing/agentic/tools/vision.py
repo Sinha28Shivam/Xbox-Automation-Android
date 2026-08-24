@@ -26,9 +26,11 @@ from __future__ import annotations
 import base64
 import io
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
+from ..logbook import log
 from ..llm import LLMFactory, LLMUnavailable
 from ..schemas import Observation
 from ..settings import Settings
@@ -148,6 +150,48 @@ class VisionTool:
             self.degraded_reasons.append(f"OCR failed: {exc}")
             return ""
 
+    # -- reading 2b: UI extraction (accessibility tree) --------------------
+    #
+    # Ground truth from the OS, not a guess from pixels or from a count of
+    # how many D-pad presses have been sent. This is what closes the gap
+    # that let the decision agent assume "one DOWN press = focus moved onto
+    # the result tile" and press A on a screen where nothing was actually
+    # focused. If the platform doesn't expose it (see ui_dump's docstring),
+    # this degrades to empty lists and is recorded as a degraded reason -
+    # never silently treated as "nothing is on screen".
+    def ui_extract(self) -> tuple[str | None, list[str]]:
+        """Return (focused_tile, visible_tiles) from a live uiautomator dump.
+
+        `focused_tile` is the text/content-desc of the node the OS reports
+        as focused or selected, `visible_tiles` is every non-empty
+        text/content-desc node on screen. Both are None/[] when the dump is
+        unavailable or unparsable - that absence is itself a real finding.
+        """
+        if not self.android or not self.android.status.adb_available:
+            return None, []
+        ok, payload = self.android.ui_dump()
+        if not ok:
+            self.degraded_reasons.append(f"ui_dump unavailable: {payload}")
+            return None, []
+        try:
+            root = ET.fromstring(payload)
+        except ET.ParseError as exc:                      # noqa: BLE001
+            self.degraded_reasons.append(f"ui_dump XML did not parse: {exc}")
+            return None, []
+
+        tiles: list[str] = []
+        focused: str | None = None
+        for node in root.iter("node"):
+            attrib = node.attrib
+            label = (attrib.get("text") or attrib.get("content-desc") or "").strip()
+            if not label:
+                continue
+            tiles.append(label)
+            is_focused = attrib.get("focused") == "true" or attrib.get("selected") == "true"
+            if is_focused and focused is None:
+                focused = label
+        return focused, tiles
+
     # -- reading 3: vision LLM --------------------------------------------
     def _encode(self, path: str) -> tuple[str, str] | None:
         """Read a PNG, downscale, return (mime, base64). None on failure."""
@@ -257,6 +301,21 @@ class VisionTool:
         if text:
             obs.screen_text = text
             sensors.append("ocr")
+
+        # Ground-truth UI extraction, BEFORE any LLM is consulted. This is
+        # the sensor that lets a decision be made from "what the OS reports
+        # is focused" rather than from a vision model's guess or from a
+        # count of how many presses were sent.
+        focused_tile, visible_tiles = self.ui_extract()
+        obs.focused_tile = focused_tile
+        obs.visible_tiles = visible_tiles
+        if focused_tile is not None or visible_tiles:
+            sensors.append("ui_dump")
+        log.see(
+            f"UI DUMP: focused_tile={focused_tile!r} "
+            f"visible_tiles={visible_tiles[:15]}"
+            + (f" (+{len(visible_tiles) - 15} more)" if len(visible_tiles) > 15 else ""),
+            indent=2)
 
         described = self.describe(path, question)
         if described:

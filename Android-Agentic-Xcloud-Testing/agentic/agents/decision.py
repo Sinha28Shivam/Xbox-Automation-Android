@@ -42,7 +42,7 @@ class DecisionAgent(Agent):
                 "agent_trace": [self.trace("decide", f"{action.describe()} - {(why or action.rationale)[:180]}")]}
 
     def _deterministic(self, gs: GameState, goal: Goal,
-                       caps: Capabilities | None, state: GraphState):
+                       caps: Capabilities | None, state: GraphState | None = None):
         buttons = {b.lower() for b in (caps.buttons if caps else [])}
         if goal.is_success(gs):
             return Action(type=ActionType.DONE, rationale=f"goal state {gs.screen_type.value} reached",
@@ -103,19 +103,36 @@ class DecisionAgent(Agent):
         return None, ""
 
     @staticmethod
-    def _search_first(goal: Goal, state: GraphState) -> bool:
+    def _search_first(goal: Goal, state: GraphState | None) -> bool:
+        if not state:
+            return "search" in (goal.description or "").lower()
         scenario = state.get("scenario")
         text = " ".join([str(getattr(scenario, "id", "")), str(getattr(scenario, "title", "")),
                          str(getattr(scenario, "intent", "")), str(goal.description)]).lower()
         return "search" in text
 
     @staticmethod
-    def _search_text_already_sent(state: GraphState) -> bool:
+    def _search_text_already_sent(state: GraphState | None) -> bool:
+        if not state:
+            return False
         transitions: list[Transition] = list(state.get("transitions", []))
-        return any(t.action and t.action.control == "__adb_text__" for t in transitions[-6:])
+        return any(t.action and t.action.control == "__adb_text__" for t in transitions[-8:])
 
     @staticmethod
-    def _y_was_sent(state: GraphState) -> bool:
+    def _actions_since_search_text(state: GraphState | None) -> int:
+        if not state:
+            return 0
+        transitions: list[Transition] = list(state.get("transitions", []))
+        indices = [i for i, t in enumerate(transitions) if t.action and t.action.control == "__adb_text__"]
+        if not indices:
+            return 0
+        last_idx = indices[-1]
+        return len(transitions) - 1 - last_idx
+
+    @staticmethod
+    def _y_was_sent(state: GraphState | None) -> bool:
+        if not state:
+            return False
         transitions: list[Transition] = list(state.get("transitions", []))
         return any(t.action and t.action.control == "y" for t in transitions[-4:])
 
@@ -129,9 +146,53 @@ class DecisionAgent(Agent):
                                       "type to search", "find games", "game search"))
 
     def _search_action(self, gs: GameState, goal: Goal,
-                       caps: Capabilities | None, state: GraphState,
+                       caps: Capabilities | None, state: GraphState | None,
                        buttons: set[str]):
         if self._search_text_already_sent(state):
+            # Target is already focused or detail page reached -> select/play with A
+            if gs.target_focused and "a" in buttons:
+                return Action(type=ActionType.PRESS, control="a",
+                              rationale=f"target {goal.target!r} is focused; select it with physical A",
+                              expected_states=[ScreenType.GAME_DETAIL, ScreenType.FULLSCREEN_TRANSITION,
+                                               ScreenType.GAME_LOADING, ScreenType.GAME_CONNECTING,
+                                               ScreenType.LIVE_GAME_STREAM, ScreenType.GAME_SPLASH]), "target focused after search"
+
+            if gs.screen_type is ScreenType.GAME_DETAIL and "a" in buttons:
+                return Action(type=ActionType.PRESS, control="a",
+                              rationale="game detail page is open; activate Play with physical A",
+                              expected_states=[ScreenType.FULLSCREEN_TRANSITION, ScreenType.GAME_LOADING,
+                                               ScreenType.GAME_CONNECTING, ScreenType.LIVE_GAME_STREAM]), "activate Play after search"
+
+            # Focus has not yet been confirmed by extraction (gs.target_focused
+            # is False - checked above). NEVER press A here on the assumption
+            # that a prior DOWN press moved focus onto the result tile: that
+            # assumption is exactly what produced the silent-failure run.
+            # DOWN's only observable effect was often the on-screen keyboard
+            # closing (a big transient glance, ~0% settled change), not focus
+            # moving onto a game tile, and `target_focused` stayed False the
+            # whole time while A was pressed three times into nothing.
+            #
+            # So instead: nudge focus towards the result row/tile and
+            # re-observe. `target_focused` is only ever set from a
+            # ground-truth extraction (uiautomator dump `focused`/`selected`
+            # node, see agentic/tools/vision.py::ui_extract) or, as a
+            # last-resort degraded fallback, an explicit vision-LLM
+            # TARGET_FOCUSED answer - never from counting presses. Bounded by
+            # `search_nav_budget` so a platform that never exposes focus
+            # (e.g. web content invisible to uiautomator) falls through to
+            # normal navigation/observe instead of looping forever.
+            nudges = self._actions_since_search_text(state)
+            budget = int(self.s.get("execution.closed_loop.search_nav_budget", 6))
+            if nudges < budget:
+                direction = "down" if "down" in buttons else self._choose_direction(buttons)
+                if direction:
+                    return Action(type=ActionType.PRESS, control=direction,
+                                  rationale=(f"search text {goal.target!r} was typed and extraction has not "
+                                             f"yet confirmed focus on the result tile (focus="
+                                             f"{gs.focus.element!r}); nudge focus with {direction} and re-observe"),
+                                  expected_states=[ScreenType.GAME_FOCUSED, ScreenType.XCLOUD_HOME,
+                                                   ScreenType.XCLOUD_LIBRARY, ScreenType.GAME_DETAIL]), "focus search result"
+
             return self._navigation_action(gs, goal, caps, state)
 
         # Y is mandatory before typing. This prevents the word "Search" visible
@@ -160,7 +221,7 @@ class DecisionAgent(Agent):
         return self._navigation_action(gs, goal, caps, state)
 
     def _navigation_action(self, gs: GameState, goal: Goal,
-                           caps: Capabilities | None, state: GraphState):
+                           caps: Capabilities | None, state: GraphState | None):
         buttons = {b.lower() for b in (caps.buttons if caps else [])}
         direction = self._choose_direction(buttons)
         if direction is None:
@@ -178,7 +239,7 @@ class DecisionAgent(Agent):
         return None
 
     def _force_progress(self, gs: GameState, goal: Goal,
-                        caps: Capabilities | None, state: GraphState):
+                        caps: Capabilities | None, state: GraphState | None):
         if self._search_first(goal, state) and gs.screen_type in (
                 ScreenType.XCLOUD_HOME, ScreenType.XCLOUD_LIBRARY,
                 ScreenType.OVERLAY, ScreenType.KEYBOARD):
@@ -218,7 +279,7 @@ class DecisionAgent(Agent):
         return "\n".join(item.describe() for item in transitions[-limit:])
 
     def _fallback(self, gs: GameState, goal: Goal,
-                  caps: Capabilities | None, state: GraphState) -> Action:
+                  caps: Capabilities | None, state: GraphState | None) -> Action:
         if self._search_first(goal, state) and gs.screen_type in (
                 ScreenType.XCLOUD_HOME, ScreenType.XCLOUD_LIBRARY,
                 ScreenType.OVERLAY, ScreenType.KEYBOARD):
