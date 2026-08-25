@@ -9,7 +9,7 @@ have been imported.
 
 from __future__ import annotations
 
-from ..schemas import Action, ActionType, ScreenType, Transition
+from .schemas import Action, ActionType, ScreenType, Transition
 
 
 def _is_android_screen(gs) -> bool:
@@ -41,9 +41,9 @@ def _recent_consecutive_state(transitions: list[Transition], state: ScreenType) 
 
 def install_runtime_guards() -> None:
     """Install deterministic launch guards once per Python process."""
-    from .decision import DecisionAgent
-    from .observer import ObserverAgent
-    from ..perception.state_builder import StateBuilder
+    from .agents.decision import DecisionAgent
+    from .agents.observer import ObserverAgent
+    from .perception.state_builder import StateBuilder
 
     if getattr(DecisionAgent, "_launch_guards_installed", False):
         return
