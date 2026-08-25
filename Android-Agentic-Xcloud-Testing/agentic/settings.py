@@ -21,32 +21,20 @@ Nothing here knows anything about xCloud, buttons, or tests. It is plumbing.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-# This file lives at <root>/agentic/settings.py, so the package root is one up.
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = PACKAGE_ROOT / "config" / "agentic.yaml"
-
 ENV_PREFIX = "XAT_"
+_ENV_REF = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 
 
 def load_dotenv(path: Path | None = None) -> list[str]:
-    """Load KEY=VALUE lines from a .env file into os.environ.
-
-    Hand-rolled rather than depending on python-dotenv: it is twenty lines, and
-    an API key being unreadable because an optional package is missing is a
-    genuinely annoying way to lose a hardware run.
-
-    Existing environment variables WIN. A real exported variable must always
-    beat a stale file, or `set OPENAI_API_KEY=...` in a shell would silently do
-    nothing and be very hard to explain.
-
-    Searched, nearest first: this package, then the project root above it - so a
-    single .env beside the .bat files serves both.
-    """
+    """Load KEY=VALUE lines from a .env file into os.environ."""
     loaded: list[str] = []
     candidates = [path] if path else [PACKAGE_ROOT / ".env",
                                       PACKAGE_ROOT.parent / ".env"]
@@ -60,7 +48,6 @@ def load_dotenv(path: Path | None = None) -> list[str]:
                     continue
                 key, _, value = line.partition("=")
                 key = key.strip()
-                # `export FOO=bar` is a common paste from shell instructions.
                 if key.startswith("export "):
                     key = key[7:].strip()
                 value = value.strip().strip('"').strip("'")
@@ -68,19 +55,11 @@ def load_dotenv(path: Path | None = None) -> list[str]:
                     os.environ[key] = value
                     loaded.append(key)
         except OSError:
-            # An unreadable .env is not worth failing a run over.
             continue
     return loaded
 
 
-
 def _coerce(text: str) -> Any:
-    """Turn an env-var string into a bool/int/float/None when it clearly is one.
-
-    Env vars are always strings, but `XAT_HARDWARE_DRY_RUN=true` must become a
-    real bool or `if dry_run:` would be true for the string "false" too - a
-    genuinely dangerous bug here, because it decides whether we touch hardware.
-    """
     low = text.strip().lower()
     if low in ("true", "yes", "on"):
         return True
@@ -99,27 +78,38 @@ def _coerce(text: str) -> Any:
     return text
 
 
+def _resolve_env_reference(value: Any) -> Any:
+    """Resolve a YAML scalar such as `${ANDROID_SERIAL`}` from os.environ.
+
+    This is intentionally exact-match only. It avoids silently rewriting normal
+    strings and makes missing references fall back to the caller's default.
+    """
+    if not isinstance(value, str):
+        return value
+    match = _ENV_REF.fullmatch(value.strip())
+    if not match:
+        return value
+    env_name = match.group(1)
+    if env_name not in os.environ:
+        return None
+    return _coerce(os.environ[env_name])
+
+
 class Settings:
     """Dotted-path, layered view over agentic.yaml."""
 
     def __init__(self, path: Path | str | None = None,
                  overrides: dict[str, Any] | None = None,
                  use_dotenv: bool = True):
-        # Before anything reads os.environ - the LLM factory looks up API keys
-        # at construction time, so a late load would be a load that never counted.
         self.dotenv_keys = load_dotenv() if use_dotenv else []
-
         self.path = Path(path) if path else DEFAULT_CONFIG
         self.data: dict[str, Any] = {}
         if self.path.is_file():
             with self.path.open("r", encoding="utf-8") as fh:
                 self.data = yaml.safe_load(fh) or {}
-        # A missing config file is not fatal: every getter has a default, so the
-        # tool still runs. We record it so the report can say so honestly.
         self.config_found = self.path.is_file()
         self._overrides: dict[str, Any] = dict(overrides or {})
 
-    # -- reading -----------------------------------------------------------
     def get(self, dotted: str, default: Any = None) -> Any:
         if dotted in self._overrides:
             value = self._overrides[dotted]
@@ -135,9 +125,11 @@ class Settings:
             if not isinstance(node, dict) or part not in node:
                 return default
             node = node[part]
-        # An explicit `key: null` in YAML means "unset", so fall back. This is
-        # deliberate: the config uses null as "auto-detect" (e.g. serial_port).
-        return default if node is None else node
+
+        if node is None:
+            return default
+        resolved = _resolve_env_reference(node)
+        return default if resolved is None else resolved
 
     def section(self, dotted: str) -> dict[str, Any]:
         value = self.get(dotted, {})
@@ -149,21 +141,12 @@ class Settings:
             return list(default or [])
         if isinstance(value, (list, tuple)):
             return list(value)
-        # Accept a comma-separated string so env-var overrides work for lists.
         return [p.strip() for p in str(value).split(",") if p.strip()]
 
-    # -- writing (CLI flags only) ------------------------------------------
     def override(self, dotted: str, value: Any) -> None:
         self._overrides[dotted] = value
 
-    # -- paths -------------------------------------------------------------
     def resolve_path(self, dotted: str, default: str) -> Path:
-        """Resolve a configured path relative to the PACKAGE root.
-
-        Relative-to-package (not to the shell's cwd) matters: the .bat files run
-        from the project root while a developer runs python from inside this
-        folder, and both must find ../config/controls.yaml.
-        """
         raw = str(self.get(dotted, default))
         candidate = Path(raw)
         if candidate.is_absolute():
