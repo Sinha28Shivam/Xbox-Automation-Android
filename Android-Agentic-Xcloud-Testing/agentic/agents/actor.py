@@ -26,6 +26,43 @@ class ActorAgent(Agent):
         super().__init__(ctx)  # type: ignore[arg-type]
         self._exec = ExecutorAgent(ctx)  # type: ignore[arg-type]
 
+    @staticmethod
+    def _search_input_confirmed(state: GameState | None) -> bool:
+        """Second safety wall before any ADB_TEXT reaches the phone.
+
+        DecisionAgent owns the normal policy, but the executor must defend the
+        physical side too. A future LLM change, a malformed state, or a stale
+        transition must never turn the word "Search" on the home page into a
+        text-injection permission.
+        """
+        if state is None:
+            return False
+        if state.screen_type.value == "keyboard":
+            return True
+
+        focus = (state.focus.element or "").lower()
+        if any(term in focus for term in (
+                "search field", "search box", "search input", "input",
+                "edittext", "textbox")):
+            return True
+
+        obs = state.observation
+        if obs is None:
+            return False
+        focus = (obs.focused_tile or "").lower()
+        if any(term in focus for term in (
+                "search field", "search box", "search input", "input",
+                "edittext", "textbox")):
+            return True
+
+        text = (obs.screen_text + " " + obs.screen_description).lower()
+        field = any(term in text for term in (
+            "search field", "search box", "search input", "type to search",
+            "text field", "textbox"))
+        focused = any(term in text for term in (
+            "focused", "focus is", "cursor", "text cursor", "keyboard"))
+        return field and focused
+
     def run(self, state: GraphState) -> GraphState:
         action: Action | None = state.get("pending_action")
         before: GameState | None = state.get("game_state")
@@ -61,11 +98,28 @@ class ActorAgent(Agent):
         # Search text is intentionally represented as an OBSERVE sentinel in
         # Action because the live decision schema is controller-centric. Convert
         # it here, immediately before dispatch, into the existing ADB_TEXT step.
-        # This is the ONLY place in the closed loop where the sentinel is legal.
         search_text_step = (
             action.type is ActionType.OBSERVE and
             action.control == SEARCH_TEXT_SENTINEL
         )
+
+        # Defense in depth: the decision agent normally prevents this branch
+        # unless search focus is confirmed. Keep the physical executor guarded
+        # as well so an accidental/stale/LLM-generated sentinel can never inject
+        # text into the wrong browser element.
+        if search_text_step and not self._search_input_confirmed(before):
+            log.warn("ADB_TEXT BLOCKED: search input focus was not independently "
+                     "confirmed. Waiting for a fresh observation instead of "
+                     "typing into an unknown UI element.", indent=1)
+            action = Action(
+                type=ActionType.WAIT,
+                seconds=float(self.s.get("execution.closed_loop.search_focus_wait", 0.8)),
+                rationale="search text was blocked because input focus was not confirmed",
+                expected_states=[ScreenType.XCLOUD_HOME, ScreenType.XCLOUD_LIBRARY,
+                                 ScreenType.OVERLAY, ScreenType.KEYBOARD],
+            )
+            search_text_step = False
+
         if search_text_step:
             text = str(goal.target if goal and goal.target else "").strip()
             if not text:
