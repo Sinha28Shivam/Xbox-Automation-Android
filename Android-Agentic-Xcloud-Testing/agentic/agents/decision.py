@@ -148,6 +148,29 @@ class DecisionAgent(Agent):
         return sum(1 for t in transitions[-limit:]
                    if t.action and (t.action.control or "").lower() == control.lower())
 
+    @staticmethod
+    def _count_action_since(state: GraphState | None, control: str,
+                            reset_control: str, limit: int = 20) -> int:
+        """Count an action only since the last reset action.
+
+        Search retries must be scoped to the current recovery cycle. Otherwise
+        two Y presses from the previous cycle permanently consume the Y budget
+        even after B has reset the UI.
+        """
+        if not state:
+            return 0
+        transitions: list[Transition] = list(state.get("transitions", []))[-limit:]
+        start = 0
+        for index in range(len(transitions) - 1, -1, -1):
+            action = transitions[index].action
+            if action and (action.control or "").lower() == reset_control.lower():
+                start = index + 1
+                break
+        return sum(
+            1 for item in transitions[start:]
+            if item.action and (item.action.control or "").lower() == control.lower()
+        )
+
     @classmethod
     def _focus_blob(cls, gs: GameState) -> str:
         parts = [gs.focus.element or ""]
@@ -205,12 +228,12 @@ class DecisionAgent(Agent):
             return self._navigation_action(gs, goal, caps, state)
 
         if not self._search_field_ready(gs):
-            y_attempts = self._count_recent_action(state, "y", 12)
+            y_attempts = self._count_action_since(state, "y", "b")
             max_y_attempts = int(self.s.get("execution.closed_loop.search_y_attempts", 2))
             if "y" in buttons and y_attempts < max_y_attempts:
                 return Action(type=ActionType.PRESS, control="y",
                               rationale=(f"search field is not confirmed; attempt physical Y "
-                                         f"{y_attempts + 1}/{max_y_attempts} and observe the transition"),
+                                         f"{y_attempts + 1}/{max_y_attempts} in this search cycle and observe"),
                               expected_states=[ScreenType.XCLOUD_HOME, ScreenType.XCLOUD_LIBRARY,
                                                ScreenType.OVERLAY, ScreenType.KEYBOARD]), "open search with Y"
             resets = self._count_recent_action(state, "b", 16)
