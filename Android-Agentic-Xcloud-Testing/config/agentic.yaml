@@ -1,191 +1,98 @@
 # ===========================================================================
 #  agentic.yaml - the ONLY place behaviour is declared.
-#
-#  Design rule for this whole folder: no test knowledge in Python.
-#  * WHAT to test          -> scenarios/*.yaml|md|txt (free text is fine)
-#  * WHICH controls exist  -> ../config/controls.yaml (discovered at runtime)
-#  * HOW agents behave     -> this file
-#
-#  Anything you can imagine wanting to change without a code review lives here.
-#  Every value below is read through a `.get(key, default)`, so deleting a key
-#  is safe - you get the documented default, not a KeyError.
 # ===========================================================================
 
 meta:
   version: 1
   description: "Multi-agent Android/xCloud test runner configuration"
 
-# ---------------------------------------------------------------------------
-# LLM PROVIDERS
-# Resolved at runtime by agentic/llm.py. `active` picks a profile; each agent
-# may override it (a cheap model routes, an expensive one does RCA).
-#
-# api_key_env names the ENV VAR - never put a key in this file.
-# ---------------------------------------------------------------------------
 llm:
-  # Set to match the key present in .env (ANTHROPIC_API_KEY). Change this one
-  # line to switch every agent to another provider, or override per run with
-  # `--llm local` / `--llm openai`.
   active: "anthropic"
-
   profiles:
     openai:
-      provider: "openai"           # -> langchain_openai.ChatOpenAI
+      provider: "openai"
       model: "gpt-4o-mini"
-      temperature: 0.0             # tests must be reproducible
+      temperature: 0.0
       api_key_env: "OPENAI_API_KEY"
       supports_vision: true
-
     openai_strong:
       provider: "openai"
       model: "gpt-4o"
       temperature: 0.1
       api_key_env: "OPENAI_API_KEY"
       supports_vision: true
-
-    # Model IDs are account-specific and they DO change. If a run reports
-    # `404 not_found_error: model: ...`, list what your key can actually see:
-    #     python -c "import anthropic;[print(m.id) for m in anthropic.Anthropic().models.list().data]"
-    # and put a real id here. Nothing in the code hardcodes a model name.
     anthropic:
       provider: "anthropic"
       model: "claude-sonnet-4-5-20250929"
       temperature: 0.0
       api_key_env: "ANTHROPIC_API_KEY"
       supports_vision: true
-
     anthropic_fast:
-      # Cheaper, for the high-frequency per-step judgements where the question
-      # is narrow ("did the screen change as expected?") rather than open-ended.
       provider: "anthropic"
       model: "claude-haiku-4-5-20251001"
       temperature: 0.0
       api_key_env: "ANTHROPIC_API_KEY"
       supports_vision: true
-
     gemini:
       provider: "google_genai"
       model: "gemini-2.0-flash"
       temperature: 0.0
       api_key_env: "GOOGLE_API_KEY"
       supports_vision: true
-
     local:
-      provider: "ollama"           # no API key, good for CI
+      provider: "ollama"
       model: "qwen2.5:14b-instruct"
       temperature: 0.0
       base_url: "http://localhost:11434"
       supports_vision: false
-
-  # Per-agent overrides. Omit an agent and it uses `active`.
-  #
-  # The split is about where reasoning actually pays for itself. RCA gets the
-  # strongest model because attributing a failure to the wrong LAYER sends a
-  # human down the wrong path for an hour. The executor's per-step judgement is
-  # narrow and runs on every step, so it takes the cheap one.
   agent_profiles:
     executor: "anthropic_fast"
-    observer: "anthropic"          # must be a vision profile if vision.enabled
-    rca: "anthropic"               # root cause is where reasoning pays off
-    # Closed-loop agents. Both run on EVERY iteration and both ask a narrow,
-    # well-bounded question ("which way do I move?", "was that valid
-    # progress?"), so the cheap model is the right call - the expensive one
-    # earns its keep on open-ended diagnosis, not on repetition.
+    observer: "anthropic"
+    rca: "anthropic"
     decision: "anthropic_fast"
     verifier: "anthropic_fast"
 
-
-# ---------------------------------------------------------------------------
-# HARDWARE / TRANSPORT
-# Paths are relative to THIS folder's parent, so the agentic layer never
-# duplicates the control map - it imports the verified one.
-# ---------------------------------------------------------------------------
 hardware:
   controls_config: "../config/controls.yaml"
-  pad_module_dir: "../host"        # where pad_link.py lives
-  transport: null                  # null = the profile marked `default:`
-  serial_port: null                # null = controls.yaml, then auto-detect
-  dry_run: false                   # true = plan + reason, never touch the port
+  pad_module_dir: "../host"
+  transport: null
+  serial_port: null
+  dry_run: false
 
 # ---------------------------------------------------------------------------
 # ANDROID / ADB
-# adb is OPTIONAL. Without it the run still works, but the ObserverAgent has no
-# eyes and the DeviceAgent can only confirm the pad, not the phone's UI state.
-# Every one of these is a HINT for discovery, never an assumption:
-# DeviceAgent asks the phone what is installed and what is focused.
+# Put the real device serial in the .env file as:
+#     ANDROID_SERIAL=192.168.x.x:port
+# agentic.yaml deliberately contains no device-specific serial.
 # ---------------------------------------------------------------------------
 android:
-  adb_path: "adb"                  # or an absolute path
-  serial: "192.168.31.161:36153"                     # null = the single attached device
-  required: false                  # true = abort the run when adb is missing
-
-  # xCloud is a PWA, NOT an installed app. There is no package to launch and
-  # no activity to assert on: it is a page inside a browser (often installed
-  # as a WebAPK, which is why the package name varies per device and per
-  # install method). So we never name a package - we discover browsers on the
-  # device and let the agents reason about what they find.
+  adb_path: "adb"
+  serial: "${ANDROID_SERIAL}"
+  required: false
   pwa:
     url: "https://www.xbox.com/play"
-    # Discovery hints only. DeviceAgent matches installed packages against
-    # these substrings; add yours if you use a different browser. If none
-    # match, the agents are told that and adapt - they do not crash.
     browser_hints: ["chrome", "edge", "firefox", "samsung", "brave", "opera"]
-    # A WebAPK's package usually contains this marker. Used to REPORT what was
-    # found, not to decide behaviour.
     webapk_marker: "webapk"
-    launch_mode: "view_url"        # view_url | already_open | manual
-    # After launching, how long to let the PWA settle before observing.
+    launch_mode: "view_url"
     settle_seconds: 6.0
 
-# ---------------------------------------------------------------------------
-# OBSERVATION (closing the "blind automation" loop)
-# ---------------------------------------------------------------------------
 vision:
   enabled: true
   screenshot_dir: "artifacts"
-  # Ask the LLM to describe the screenshot. Requires a vision-capable profile.
   llm_screen_reading: true
-  # Downscale before sending to the model: cheaper, and 720p is plenty to read
-  # a menu. 0 = send the native resolution.
   max_width: 1280
   jpeg_quality: 70
-  # Frame-diff sensitivity: fraction of changed pixels that counts as "the
-  # screen reacted". Below this we treat the input as having had NO effect,
-  # which is exactly the failure the parent project could not detect.
   motion_threshold: 0.01
   ocr:
-    enabled: true                  # silently skipped if pytesseract is absent
+    enabled: true
     lang: "eng"
 
 logs:
-  # ---- TERMINAL OUTPUT (agentic/logbook.py) -------------------------------
-  # A run can take five minutes and used to print nothing until it finished, so
-  # a slow stream and a hung serial port looked identical. Every layer now
-  # narrates itself: what was dispatched, every wait and WHY, both looks at the
-  # screen with their change ratios, and each judgement as it is made.
-  #
-  #   debug   everything, including adb calls and per-frame notes
-  #   info    the default: steps, actions, waits, observations, judgements
-  #   warn    only problems
-  #   error   only failures
-  #   silent  nothing (the final report still prints)
   level: "info"
-  # Mirror the terminal log to artifacts/<run_id>/run.log. Costs nothing and it
-  # lands beside the screenshots it describes, which is what makes a failed run
-  # re-readable a week later.
   file_enabled: true
-  # ANSI colour on the console. null = auto-detect (off when piped or when
-  # NO_COLOR is set); the file copy is never coloured.
   colour: null
-
-  # ---- DEVICE LOGS -------------------------------------------------------
-  # Captured around each step so the RCA agent has evidence, not guesses.
   logcat_enabled: true
   logcat_lines: 400
-
-  # Tag filters are hints for RELEVANCE scoring, not a hard filter - we keep
-  # the raw buffer too, because the interesting line is never in the list you
-  # thought of in advance.
   interesting_patterns:
     - "xcloud"
     - "gamepad"
@@ -197,251 +104,72 @@ logs:
     - "ANR"
     - "FATAL"
 
-# ---------------------------------------------------------------------------
-# EXECUTION
-# ---------------------------------------------------------------------------
 execution:
-  # closed_loop = observe -> decide ONE action -> execute -> observe -> verify.
-  #               The DEFAULT and the correct architecture. The next action is
-  #               chosen from the screen in front of it, so the number of
-  #               presses needed to cross a menu is an OUTPUT of watching the
-  #               highlight rather than a number guessed in advance.
-  # plan        = follow a pre-written PlannerAgent step list, observing after
-  #               each. LEGACY.
-  # adaptive    = plan first, divert to RCA when a step's expectation is not
-  #               met. LEGACY.
-  #
-  # Why the legacy modes still exist: they are the rollback path for one
-  # release. If a closed-loop run regresses, `mode: adaptive` restores the old
-  # behaviour with a single edit instead of a git bisect. They are expected to
-  # be removed once a green run is on record.
   mode: "closed_loop"
-  max_steps: 60                    # hard stop for plan mode; guards against loops
+  max_steps: 60
   max_reactive_iterations: 12
   step_timeout_seconds: 45.0
-
-  # -------------------------------------------------------------------------
-  # CLOSED LOOP
-  # -------------------------------------------------------------------------
-  # How many observe/decide/act/verify passes before giving up. This replaces
-  # `max_steps` as the real bound in closed-loop mode: there is no step list to
-  # count, only iterations of the cycle. 40 is generous for a launch flow -
-  # navigating a rail plus a game boot is typically 12-20.
-  max_iterations: 40
+  max_iterations: 28
 
   closed_loop:
-    # -----------------------------------------------------------------------
-    # THE SIGNAL HANDSHAKE - a browser protocol step, not a convenience
-    #
-    # The W3C Gamepad API hides a gamepad from a page until the pad sends a
-    # button event:
-    #
-    #     navigator.getGamepads() returns nothing for a pad that has not yet
-    #     reported a button press.
-    #
-    # It is an anti-fingerprinting rule and it applies to every browser, so a
-    # FRESHLY LOADED xCloud page cannot see the Leonardo no matter how correctly
-    # it is wired. Until one button report arrives, every input is discarded by
-    # the PAGE - not by the board, not by the phone - which produces exactly the
-    # signature of a wiring fault:
-    #
-    #     hardware_ok = true, screen unchanged, nothing ever works
-    #
-    # So the run performs guide x2 (visible: it opens the xCloud overlay) then B
-    # (puts the UI back), after EVERY page load. The sequence itself lives in
-    # ../config/controls.yaml as `special_actions.signal_handshake`, because it
-    # belongs to the rig rather than to the framework.
-    # -----------------------------------------------------------------------
     handshake:
-      # Turning this off is almost always wrong. The only legitimate case is a
-      # rig where something else has already announced the pad to the page.
       enabled: true
-
-      # How many times to try before giving up. Each attempt is guide x2 -> look
-      # -> (if nothing) one more guide -> look -> B, so 2 attempts already means
-      # up to six Guide presses. Beyond that a failure is a FINDING, not
-      # something to keep hammering.
       max_attempts: 2
-
-      # Used only if controls.yaml has no `signal_handshake` action. Two because
-      # the first press is commonly consumed by the page taking focus rather
-      # than by the pad announcing itself.
       guide_presses: 2
-
-      # Confirm the overlay actually appeared (frame diff or OCR) instead of
-      # assuming the presses landed.
-      #
-      # This is worth the ~2s and 2 screenshots: controls.yaml explicitly flags
-      # `guide` as UNVERIFIED because some Android builds intercept the HID Home
-      # usage before the app sees it. If that happens on your device, a
-      # fire-and-forget handshake leaves the run blind and every later step
-      # looks like a hardware fault. Verified, the run says so immediately.
-      #
-      # Without adb there is nothing to look at, and the run degrades to
-      # fire-and-forget - reported honestly as an assumption, not a finding.
       verify: true
 
-    # Cheap recoveries (wait for a loading screen, dismiss an overlay, look
-
-    # again) per goal before giving up and running a full root-cause analysis.
-    #
-    # Deliberately small. Retrying indefinitely is how a rig produces a hundred
-    # identical failures instead of one useful diagnosis: attempt, verify,
-    # recover, attempt, verify, then stop and say what happened.
     max_recovery_attempts: 2
-
-    # How many observations may produce NO SENSOR DATA AT ALL before the loop
-    # gives up and says so.
-    #
-    # Without adb there are no screenshots, so every screen classifies as
-    # UNKNOWN at 0% confidence, so the decision agent correctly answers OBSERVE
-    # - forever. Every individual decision is right and the aggregate is a
-    # livelock: `max_iterations` stops it eventually, but eventually is ~30
-    # minutes, and the conclusion available after the third pass is the same one
-    # available after the fortieth.
-    #
-    # The bar is deliberately "no sensors used", not "low confidence". A screen
-    # that OCR could read but nothing could classify is a real perception
-    # problem worth looking at again; a screen nobody photographed is a rig
-    # problem, and the honest thing is to stop and name it.
     max_blind_iterations: 3
-
-
-    # Navigation is ONE press per observation, always. Exposed here to document
-    # the invariant rather than to invite raising it - the schema constrains
-    # `Action.times` to 1, so a larger number here would be ignored. Pressing
-    # twice without looking is what makes a run interact with the wrong screen.
     max_consecutive_navigation: 1
-
-    # After search text is typed, how many focus-nudge presses (DOWN, etc.)
-    # the search flow will send while waiting for EXTRACTION (uiautomator
-    # dump `focused`/`selected` node, never a press count or a vision-model
-    # guess) to confirm the result tile is focused, before giving up on the
-    # search-specific route and falling back to plain navigation. This is
-    # the budget that replaced "assume focus moved after exactly one DOWN
-    # press", which is what produced silent A-press failures when DOWN's
-    # only real effect was the on-screen keyboard closing.
     search_nav_budget: 6
+    search_y_attempts: 2
+    search_reset_budget: 2
 
-    # -----------------------------------------------------------------------
-    # PERCEPTION CONFIDENCE BANDS
-    #
-    # These decide when the cheap tier is trusted and when a vision-LLM call is
-    # worth paying for. The previous pipeline had no such decision: it computed
-    # OCR and a frame diff and then called a vision model anyway, on BOTH the
-    # glance and the settle of every acting step - two calls before anything
-    # asked whether they were needed. That is the main reason a 10-step run
-    # cost 517 seconds and 32 LLM calls.
-    # -----------------------------------------------------------------------
+    # Launch watchdog. A real launch may spend several observations in the
+    # fullscreen handoff, but an identical black screen must not consume the
+    # entire run. The verifier/recovery path uses this budget to re-announce the
+    # controller before escalating to RCA.
+    fullscreen_transition:
+      wait_seconds: 3.0
+      max_repeats: 5
+
     confidence:
-      # At or above this, act on the state as read.
       act: 0.85
-      # Below this, escalate to the vision LLM / observe again. Between the two,
-      # the state is used but treated as soft evidence.
       reobserve: 0.60
 
     perception:
-      # Try OCR + frame diff + geometry before any model call.
       fast_first: true
-      # Escalate to the vision LLM when the fast tier lands below `reobserve`.
-      # Set false on a metered key: the run still works, but an unfamiliar
-      # screen will stay UNKNOWN and the loop will spend iterations observing
-      # rather than resolving it.
       vision_on_low_confidence: true
 
-  # DEPRECATED, kept so an old config still runs. Superseded by execution.settle
-  # below, which replaced this single number with a per-action-kind pair. It is
-  # no longer read by the executor.
   observe_delay_seconds: 1.5
-  # Release every control when a run ends, however it ends. Non-negotiable:
-  # a crash mid-stick otherwise leaves the character walking into a wall.
   always_reset_on_exit: true
 
-  # -------------------------------------------------------------------------
-  # SETTLE - the wait after every action, and WHEN we look at the screen.
-  #
-  # Read by agentic/timing.py, which is the only place this project sleeps.
-  #
-  # WHY THERE ARE TWO NUMBERS PER ACTION
-  # Run 20260817-105323 pressed the D-pad, the xCloud highlight moved (the frame
-  # diff measured 3.257%), the highlight settled back, and THEN the harness took
-  # its one screenshot - measured 0.074% - and reported FAIL. The evidence was
-  # photographed out of existence. Its own RCA called this a harness defect at
-  # 85% confidence and asked for a capture "immediately after nav_test, before
-  # any wait".
-  #
-  # So each input is now followed by:
-  #   glance  a short wait, then a look - catches a TRANSIENT reaction
-  #   settle  the rest of the animation, then a second look - the stable state
-  # A step counts as having reacted if EITHER frame moved.
-  #
-  # Cost: this doubles screenshots and vision-LLM calls on acting steps. Set
-  # glance_enabled: false to go back to one look per step (and to accept that a
-  # transient reaction will be missed again).
-  # -------------------------------------------------------------------------
   settle:
     glance_enabled: true
-    # Multiplies every glance and settle below. The one knob to turn when the
-    # network is congested or the phone is slow - no need to edit each pair.
     scale: 1.0
-
-    # A button press: the menu highlight moves almost at once, then settles.
     press:   { glance: 0.45, settle: 1.20 }
     hold:    { glance: 0.45, settle: 1.50 }
-    # A macro is several inputs, so its reaction is longer and later.
     macro:   { glance: 0.60, settle: 2.00 }
     stick:   { glance: 0.45, settle: 1.20 }
     trigger: { glance: 0.45, settle: 1.20 }
     special: { glance: 0.60, settle: 2.00 }
-    # A page load over the network, not an app start. Nothing to glance at for
-    # the first second, so the glance is longer here than anywhere else.
     pwa:     { glance: 1.50, settle: 6.00 }
     reset:   { glance: 0.20, settle: 0.40 }
-    # OBSERVE steps ARE the observation, so they need no glance.
     observe: { glance: 0.00, settle: 0.30 }
-    # A WAIT step already carries its own duration; adding more would be
-    # double-counting the delay the planner asked for.
     wait:    { glance: 0.00, settle: 0.00 }
-    # Used for any action kind not named above.
     default: { glance: 0.45, settle: 1.50 }
 
-
-# ---------------------------------------------------------------------------
-# RETRY / SELF-HEALING
-# ---------------------------------------------------------------------------
 retry:
-  max_replans: 2                   # RCA -> replan cycles before giving up
-  # RCA classifies the cause; only these classes are worth another attempt.
-  # A wiring fault is not going to fix itself on retry - stopping fast and
-  # saying so is more useful than three identical failures.
+  max_replans: 2
   retryable_causes: ["timing", "flaky_ui", "network", "stream_latency"]
 
-# ---------------------------------------------------------------------------
-# REPORTING
-# ---------------------------------------------------------------------------
 report:
   output_dir: "reports"
   formats: ["json", "markdown", "html"]
   include_screenshots: true
-  include_raw_logs: false          # true makes reports big but self-contained
-
-  # Screenshots are EMBEDDED into the HTML as base64 data URIs, not linked.
-  #
-  # Linking was tried first and looked correct - the <img src="file:///..."> tags
-  # were right and the PNGs were on disk - but the images rendered as nothing. A
-  # `file://` subresource is blocked when the page is served over http, inside an
-  # IDE webview, and anywhere the absolute path does not exist (an emailed report,
-  # a PR, another machine). Embedding makes the .html a single self-contained
-  # artefact that renders everywhere.
-  #
-  # The cost is file size, so the embedded copy is a downscaled JPEG thumbnail.
-  # The full-resolution PNG stays in artifacts/ and is still hyperlinked, so
-  # clicking a thumbnail opens the original.
-  thumbnail_width: 360             # px; 0 = embed the full-size PNG (large)
-  thumbnail_quality: 72            # JPEG quality for the embedded copy
-
-  # Rendered by the ReporterAgent; unknown keys are ignored, so adding a
-  # section here is safe even if a run has no data for it.
+  include_raw_logs: false
+  thumbnail_width: 360
+  thumbnail_quality: 72
   sections:
     - "verdict"
     - "scenario"
@@ -451,18 +179,13 @@ report:
     - "root_cause"
     - "recommendations"
 
-# ---------------------------------------------------------------------------
-# SAFETY - things the agents are forbidden to do, enforced in code, not prompt.
-# A prompt is a request; the tool registry is a wall.
-# ---------------------------------------------------------------------------
 safety:
-  allow_shell: false               # arbitrary `adb shell` for the LLM
-  # Only used when allow_shell is true. Prefix-matched against the command.
+  allow_shell: false
   allowed_shell_prefixes:
     - "dumpsys "
     - "pm list "
     - "getprop"
     - "wm size"
     - "input keyevent"
-  forbidden_controls: []           # e.g. ["guide"] if Home hijacks your device
+  forbidden_controls: []
   max_run_seconds: 900

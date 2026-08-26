@@ -1,4 +1,11 @@
-"""Closed-loop decision agent for xCloud."""
+"""Closed-loop decision agent for xCloud.
+
+The decision layer chooses ONE action from the currently observed state. Search
+is deliberately handled as a guarded state transition: seeing the word
+"Search" on the xCloud home page is NOT enough to prove that the search input is
+open or focused. Text injection is therefore allowed only after independent
+focus evidence is present.
+"""
 
 from __future__ import annotations
 
@@ -9,10 +16,17 @@ from .base import Agent
 
 ROLE = """\
 Choose exactly ONE action from the current observed screen.
-Use physical gamepad Y to open xCloud Search in search-first scenarios. Once the
-search field is focused, use the ADB text fixture once, then use only physical
-controller input for result selection and game launch.
+Use physical gamepad Y to open xCloud Search in search-first scenarios. Never
+inject text merely because the page contains the word "Search". Text injection
+is allowed only after the search input is independently confirmed as focused or
+an explicit keyboard/search-input state is observed. After text is entered,
+first dismiss any remaining software keyboard/search-input ownership with B,
+then establish physical result focus with D-pad navigation, and only then press
+A. Prefer deterministic state evidence over assumptions and never repeat an
+action just because the LLM suggested it again.
 """
+
+SEARCH_TEXT_SENTINEL = "__adb_text__"
 
 
 class DecisionAgent(Agent):
@@ -75,19 +89,39 @@ class DecisionAgent(Agent):
                           rationale="press-any-button screen explicitly requests input",
                           expected_states=[ScreenType.GAME_MAIN_MENU, ScreenType.GAME_SPLASH, ScreenType.IN_GAME]), "press-any-button"
 
-        # Search-first is evaluated before the generic overlay/navigation rules.
         if self._search_first(goal, state) and gs.screen_type in (
                 ScreenType.XCLOUD_HOME, ScreenType.XCLOUD_LIBRARY,
-                ScreenType.OVERLAY, ScreenType.KEYBOARD):
+                ScreenType.OVERLAY, ScreenType.KEYBOARD, ScreenType.GAME_FOCUSED):
             search = self._search_action(gs, goal, caps, state, buttons)
             if search is not None:
                 return search
+
+        # A software keyboard/search field can remain active even when the
+        # accessibility tree reports the game result as focused. In that state
+        # A is NOT a game-selection command. Give the UI back to xCloud first.
+        if self._search_input_still_owns_input(gs) and "b" in buttons:
+            return Action(type=ActionType.PRESS, control="b",
+                          rationale=("software keyboard or search input is still active after text entry; "
+                                     "dismiss it before trusting target focus"),
+                          expected_states=[ScreenType.XCLOUD_HOME, ScreenType.XCLOUD_LIBRARY,
+                                           ScreenType.GAME_FOCUSED, ScreenType.KEYBOARD, ScreenType.OVERLAY]), "dismiss search keyboard"
 
         if (gs.screen_type in (ScreenType.DIALOG, ScreenType.OVERLAY) or gs.overlay_present) and "b" in buttons:
             return Action(type=ActionType.PRESS, control="b",
                           rationale="dismiss visible dialog/overlay",
                           expected_states=[ScreenType.XCLOUD_HOME, ScreenType.GAME_FOCUSED, ScreenType.GAME_DETAIL]), "dismiss overlay"
         if gs.target_focused and "a" in buttons:
+            if self._last_a_was_silent_failure(state):
+                direction = self._choose_direction(buttons)
+                if direction:
+                    return Action(type=ActionType.PRESS, control=direction,
+                                  rationale=("the previous A produced no screen reaction; "
+                                             f"do not repeat A blindly, recover focus with {direction} and observe"),
+                                  expected_states=[ScreenType.GAME_FOCUSED, ScreenType.GAME_DETAIL,
+                                                   ScreenType.XCLOUD_HOME, ScreenType.XCLOUD_LIBRARY]), "recover after ignored A"
+                return Action(type=ActionType.OBSERVE,
+                              rationale="the previous A produced no reaction and no navigation control is available; observe before retrying",
+                              expected_states=[ScreenType.GAME_FOCUSED, ScreenType.GAME_DETAIL]), "recover after ignored A"
             return Action(type=ActionType.PRESS, control="a",
                           rationale=f"target {goal.target!r} is focused; select it",
                           expected_states=[ScreenType.GAME_DETAIL, ScreenType.FULLSCREEN_TRANSITION,
@@ -116,108 +150,221 @@ class DecisionAgent(Agent):
         if not state:
             return False
         transitions: list[Transition] = list(state.get("transitions", []))
-        return any(t.action and t.action.control == "__adb_text__" for t in transitions[-8:])
+        return any(t.action and t.action.control == SEARCH_TEXT_SENTINEL for t in transitions[-12:])
 
     @staticmethod
     def _actions_since_search_text(state: GraphState | None) -> int:
         if not state:
             return 0
         transitions: list[Transition] = list(state.get("transitions", []))
-        indices = [i for i, t in enumerate(transitions) if t.action and t.action.control == "__adb_text__"]
+        indices = [i for i, t in enumerate(transitions) if t.action and t.action.control == SEARCH_TEXT_SENTINEL]
         if not indices:
             return 0
-        last_idx = indices[-1]
-        return len(transitions) - 1 - last_idx
+        return len(transitions) - 1 - indices[-1]
 
     @staticmethod
-    def _y_was_sent(state: GraphState | None) -> bool:
+    def _count_recent_action(state: GraphState | None, control: str, limit: int = 8) -> int:
+        if not state:
+            return 0
+        transitions: list[Transition] = list(state.get("transitions", []))
+        return sum(1 for t in transitions[-limit:]
+                   if t.action and (t.action.control or "").lower() == control.lower())
+
+    @staticmethod
+    def _count_action_since(state: GraphState | None, control: str,
+                            reset_control: str, limit: int = 20) -> int:
+        """Count an action only since the last reset action.
+
+        Search retries must be scoped to the current recovery cycle. Otherwise
+        two Y presses from the previous cycle permanently consume the Y budget
+        even after B has reset the UI.
+        """
+        if not state:
+            return 0
+        transitions: list[Transition] = list(state.get("transitions", []))[-limit:]
+        start = 0
+        for index in range(len(transitions) - 1, -1, -1):
+            action = transitions[index].action
+            if action and (action.control or "").lower() == reset_control.lower():
+                start = index + 1
+                break
+        return sum(
+            1 for item in transitions[start:]
+            if item.action and (item.action.control or "").lower() == control.lower()
+        )
+
+    @staticmethod
+    def _last_a_was_silent_failure(state: GraphState | None) -> bool:
+        """Return True only when the immediately previous action was A and
+        neither the glance nor settled observation saw a reaction.
+
+        This prevents the closed loop from spending multiple iterations on the
+        same A press when the UI focus assumption was wrong. A transient or
+        successful A remains retryable because the transition contains evidence
+        that the UI reacted.
+        """
         if not state:
             return False
-        transitions: list[Transition] = list(state.get("transitions", []))
-        return any(t.action and t.action.control == "y" for t in transitions[-4:])
+        transition = state.get("last_transition")
+        if transition is None:
+            transitions: list[Transition] = list(state.get("transitions", []))
+            transition = transitions[-1] if transitions else None
+        if transition is None or transition.action is None:
+            return False
+        return ((transition.action.control or "").lower() == "a"
+                and bool(transition.silent_failure))
+
+    @classmethod
+    def _focus_blob(cls, gs: GameState) -> str:
+        parts = [gs.focus.element or ""]
+        if gs.observation is not None:
+            parts.append(gs.observation.focused_tile or "")
+        return " ".join(parts).strip().lower()
+
+    @classmethod
+    def _search_input_still_owns_input(cls, gs: GameState) -> bool:
+        """Detect the Android IME/search field even when xCloud's result node
+        is also reported as focused by the accessibility tree.
+
+        The failed run exposed exactly this race: after ADB text injection the
+        result label was present in `focused_tile`, but the on-screen keyboard
+        was still visible. Treating `focused_tile == target` as sufficient made
+        the agent send A three times into the wrong focus context.
+        """
+        if gs.screen_type is ScreenType.KEYBOARD:
+            return True
+
+        obs = gs.observation
+        if obs is None:
+            return False
+
+        focus = cls._focus_blob(gs)
+        if any(term in focus for term in (
+                "search", "search box", "search field", "search input",
+                "edittext", "text field", "textbox")):
+            return True
+
+        text = " ".join((
+            obs.screen_text or "",
+            obs.screen_description or "",
+            " ".join(obs.notes or []),
+        )).lower()
+        keyboard_terms = (
+            "on-screen keyboard", "onscreen keyboard", "software keyboard",
+            "keyboard is visible", "keyboard remains visible", "keyboard overlay",
+            "android keyboard", "gboard", "input method", "ime",
+            "auto-fill suggestions available above the keyboard",
+        )
+        if any(term in text for term in keyboard_terms):
+            return True
+
+        # ADB text was used recently and the search UI still exposes a text
+        # field/cursor. This is intentionally conservative: it only runs in the
+        # search-first path and is therefore not a generic B-on-every-screen rule.
+        return any(term in text for term in (
+            "text cursor", "search field", "search input", "type to search",
+            "enter search")) and cls._has_recent_search_text(gs)
 
     @staticmethod
-    def _search_visible(gs: GameState) -> bool:
-        blob = " ".join(gs.visible_text + gs.evidence + [gs.focus.element or ""])
-        if gs.observation:
-            blob += " " + gs.observation.screen_description
-        low = blob.lower()
-        return any(x in low for x in ("search", "search games", "search for a game",
-                                      "type to search", "find games", "game search"))
+    def _has_recent_search_text(gs: GameState) -> bool:
+        obs = gs.observation
+        if obs is None:
+            return False
+        return "__adb_text__" in " ".join(obs.notes or [])
+
+    @classmethod
+    def _search_field_ready(cls, gs: GameState) -> bool:
+        if gs.screen_type is ScreenType.KEYBOARD:
+            return True
+        focus = cls._focus_blob(gs)
+        if any(term in focus for term in ("search", "input", "edittext", "text field", "textbox", "search box", "search field")):
+            return True
+        obs = gs.observation
+        if obs is None:
+            return False
+        text = (obs.screen_text + " " + obs.screen_description).lower()
+        has_field = any(term in text for term in (
+            "search field", "search box", "search input", "type to search",
+            "enter search", "text field", "textbox"))
+        has_focus = any(term in text for term in (
+            "focused", "focus is", "cursor", "text cursor", "keyboard"))
+        return has_field and has_focus
+
+    @classmethod
+    def _search_visible(cls, gs: GameState) -> bool:
+        return cls._search_field_ready(gs)
 
     def _search_action(self, gs: GameState, goal: Goal,
                        caps: Capabilities | None, state: GraphState | None,
                        buttons: set[str]):
         if self._search_text_already_sent(state):
-            # Target is already focused or detail page reached -> select/play with A
+            # IMPORTANT: result-node focus from the accessibility tree does not
+            # prove that the Android IME has released ownership. Dismiss the
+            # keyboard first and only evaluate target_focused on the next look.
+            if self._search_input_still_owns_input(gs) and "b" in buttons:
+                return Action(type=ActionType.PRESS, control="b",
+                              rationale=("search text was entered but the software keyboard/search input "
+                                         "still appears active; press B to dismiss it before selecting the result"),
+                              expected_states=[ScreenType.XCLOUD_HOME, ScreenType.XCLOUD_LIBRARY,
+                                               ScreenType.GAME_FOCUSED, ScreenType.KEYBOARD, ScreenType.OVERLAY]), "dismiss keyboard after search text"
             if gs.target_focused and "a" in buttons:
-                return Action(type=ActionType.PRESS, control="a",
-                              rationale=f"target {goal.target!r} is focused; select it with physical A",
-                              expected_states=[ScreenType.GAME_DETAIL, ScreenType.FULLSCREEN_TRANSITION,
-                                               ScreenType.GAME_LOADING, ScreenType.GAME_CONNECTING,
-                                               ScreenType.LIVE_GAME_STREAM, ScreenType.GAME_SPLASH]), "target focused after search"
-
+                if self._last_a_was_silent_failure(state):
+                    direction = self._choose_direction(buttons)
+                    if direction:
+                        return Action(type=ActionType.PRESS, control=direction,
+                                      rationale=("target was reported focused, but the previous A produced no reaction; "
+                                                 f"recover focus with {direction} and re-observe instead of repeating A"),
+                                      expected_states=[ScreenType.GAME_FOCUSED, ScreenType.GAME_DETAIL,
+                                                       ScreenType.XCLOUD_HOME, ScreenType.XCLOUD_LIBRARY]), "recover search focus after ignored A"
+                else:
+                    return Action(type=ActionType.PRESS, control="a",
+                                  rationale=f"target {goal.target!r} is focused; select it with physical A",
+                                  expected_states=[ScreenType.GAME_DETAIL, ScreenType.FULLSCREEN_TRANSITION,
+                                                   ScreenType.GAME_LOADING, ScreenType.GAME_CONNECTING,
+                                                   ScreenType.LIVE_GAME_STREAM, ScreenType.GAME_SPLASH]), "target focused after search"
             if gs.screen_type is ScreenType.GAME_DETAIL and "a" in buttons:
                 return Action(type=ActionType.PRESS, control="a",
                               rationale="game detail page is open; activate Play with physical A",
                               expected_states=[ScreenType.FULLSCREEN_TRANSITION, ScreenType.GAME_LOADING,
                                                ScreenType.GAME_CONNECTING, ScreenType.LIVE_GAME_STREAM]), "activate Play after search"
-
-            # Focus has not yet been confirmed by extraction (gs.target_focused
-            # is False - checked above). NEVER press A here on the assumption
-            # that a prior DOWN press moved focus onto the result tile: that
-            # assumption is exactly what produced the silent-failure run.
-            # DOWN's only observable effect was often the on-screen keyboard
-            # closing (a big transient glance, ~0% settled change), not focus
-            # moving onto a game tile, and `target_focused` stayed False the
-            # whole time while A was pressed three times into nothing.
-            #
-            # So instead: nudge focus towards the result row/tile and
-            # re-observe. `target_focused` is only ever set from a
-            # ground-truth extraction (uiautomator dump `focused`/`selected`
-            # node, see agentic/tools/vision.py::ui_extract) or, as a
-            # last-resort degraded fallback, an explicit vision-LLM
-            # TARGET_FOCUSED answer - never from counting presses. Bounded by
-            # `search_nav_budget` so a platform that never exposes focus
-            # (e.g. web content invisible to uiautomator) falls through to
-            # normal navigation/observe instead of looping forever.
             nudges = self._actions_since_search_text(state)
             budget = int(self.s.get("execution.closed_loop.search_nav_budget", 6))
             if nudges < budget:
                 direction = "down" if "down" in buttons else self._choose_direction(buttons)
                 if direction:
                     return Action(type=ActionType.PRESS, control=direction,
-                                  rationale=(f"search text {goal.target!r} was typed and extraction has not "
-                                             f"yet confirmed focus on the result tile (focus="
-                                             f"{gs.focus.element!r}); nudge focus with {direction} and re-observe"),
+                                  rationale=(f"search text {goal.target!r} was typed but result focus is not confirmed; "
+                                             f"nudge with {direction} and re-observe"),
                                   expected_states=[ScreenType.GAME_FOCUSED, ScreenType.XCLOUD_HOME,
                                                    ScreenType.XCLOUD_LIBRARY, ScreenType.GAME_DETAIL]), "focus search result"
-
             return self._navigation_action(gs, goal, caps, state)
 
-        # Y is mandatory before typing. This prevents the word "Search" visible
-        # on the normal xCloud home page from being mistaken for a focused field.
-        if not self._y_was_sent(state):
-            if "y" in buttons:
+        if not self._search_field_ready(gs):
+            y_attempts = self._count_action_since(state, "y", "b")
+            max_y_attempts = int(self.s.get("execution.closed_loop.search_y_attempts", 2))
+            if "y" in buttons and y_attempts < max_y_attempts:
                 return Action(type=ActionType.PRESS, control="y",
-                              rationale="search-first flow: press physical Y to open xCloud Search",
+                              rationale=(f"search field is not confirmed; attempt physical Y "
+                                         f"{y_attempts + 1}/{max_y_attempts} in this search cycle and observe"),
                               expected_states=[ScreenType.XCLOUD_HOME, ScreenType.XCLOUD_LIBRARY,
                                                ScreenType.OVERLAY, ScreenType.KEYBOARD]), "open search with Y"
-            return self._navigation_action(gs, goal, caps, state)
-
-        if self._search_visible(gs) and goal.target:
-            return Action(type=ActionType.OBSERVE, control="__adb_text__",
-                          rationale=(f"physical Y opened the search UI and it is now visible/focused; "
-                                     f"type {goal.target!r} using the ADB text fixture"),
+            resets = self._count_recent_action(state, "b", 16)
+            max_resets = int(self.s.get("execution.closed_loop.search_reset_budget", 2))
+            if "b" in buttons and resets < max_resets:
+                return Action(type=ActionType.PRESS, control="b",
+                              rationale=("two physical Y attempts did not produce independently verified search focus; "
+                                         "reset the xCloud shell with B, then observe before another search attempt"),
+                              expected_states=[ScreenType.XCLOUD_HOME, ScreenType.XCLOUD_LIBRARY]), "reset failed search transition"
+            return Action(type=ActionType.OBSERVE,
+                          rationale="search transition budget exhausted; gather fresh evidence before acting",
                           expected_states=[ScreenType.XCLOUD_HOME, ScreenType.XCLOUD_LIBRARY,
-                                           ScreenType.GAME_FOCUSED]), "search field ready after Y"
+                                            ScreenType.KEYBOARD, ScreenType.OVERLAY]), "search needs diagnosis"
 
-        # Some builds consume the first Y while opening the search overlay. If
-        # the field is not visible yet, one more physical Y is allowed.
-        if "y" in buttons:
-            return Action(type=ActionType.PRESS, control="y",
-                          rationale="search UI is not yet visibly focused; retry physical Y once",
-                          expected_states=[ScreenType.XCLOUD_HOME, ScreenType.OVERLAY, ScreenType.KEYBOARD]), "search field not visible after Y"
+        if goal.target:
+            return Action(type=ActionType.OBSERVE, control=SEARCH_TEXT_SENTINEL,
+                          rationale=(f"search input is independently confirmed focused; type {goal.target!r} using the ADB fixture, then observe results"),
+                          expected_states=[ScreenType.XCLOUD_HOME, ScreenType.XCLOUD_LIBRARY,
+                                           ScreenType.GAME_FOCUSED]), "search field ready"
         return self._navigation_action(gs, goal, caps, state)
 
     def _navigation_action(self, gs: GameState, goal: Goal,
@@ -242,7 +389,7 @@ class DecisionAgent(Agent):
                         caps: Capabilities | None, state: GraphState | None):
         if self._search_first(goal, state) and gs.screen_type in (
                 ScreenType.XCLOUD_HOME, ScreenType.XCLOUD_LIBRARY,
-                ScreenType.OVERLAY, ScreenType.KEYBOARD):
+                ScreenType.OVERLAY, ScreenType.KEYBOARD, ScreenType.GAME_FOCUSED):
             return self._search_action(gs, goal, caps, state,
                                        {b.lower() for b in (caps.buttons if caps else [])})
         if gs.screen_type not in (ScreenType.XCLOUD_HOME, ScreenType.XCLOUD_LIBRARY):
@@ -274,7 +421,7 @@ class DecisionAgent(Agent):
         return "\n".join(parts)
 
     @staticmethod
-    def _history(state: GraphState, limit: int = 6) -> str:
+    def _history(state: GraphState, limit: int = 8) -> str:
         transitions: list[Transition] = list(state.get("transitions", []))
         return "\n".join(item.describe() for item in transitions[-limit:])
 
@@ -282,7 +429,7 @@ class DecisionAgent(Agent):
                   caps: Capabilities | None, state: GraphState | None) -> Action:
         if self._search_first(goal, state) and gs.screen_type in (
                 ScreenType.XCLOUD_HOME, ScreenType.XCLOUD_LIBRARY,
-                ScreenType.OVERLAY, ScreenType.KEYBOARD):
+                ScreenType.OVERLAY, ScreenType.KEYBOARD, ScreenType.GAME_FOCUSED):
             action, _ = self._search_action(gs, goal, caps, state,
                                              {b.lower() for b in (caps.buttons if caps else [])})
             if action:
