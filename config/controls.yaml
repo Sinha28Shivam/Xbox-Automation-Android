@@ -39,7 +39,7 @@ transports:
     ble_device_name: null
     dpad_mode: "hat"
     default: true
-    serial_port: "COM8"
+    serial_port: "COM5"
     # The Leonardo's single USB port goes to the PHONE - that is how it appears
     # as a controller - so commands arrive over the hardware UART instead:
     #     FT232RL TX  -> Leonardo RX (D0)     (TX and RX must CROSS)
@@ -59,9 +59,10 @@ transports:
 # with capture-device indices silently swapping).
 # ---------------------------------------------------------------------------
 connection:
-  # COM8 is the FT232RL UART bridge - the VERIFIED WORKING command link.
+  # COM5 is the FT232RL UART bridge on this machine - the command link.
+  # (COM numbers move when you replug; the FT232RL is 0403:6001.)
   # Set to null to auto-detect by USB ID instead.
-  serial_port: "COM8"
+  serial_port: "COM5"
   baudrate: 115200
   # USB VID:PID pairs to look for when auto-detecting, in PRIORITY order.
   # The FT232RL is first because it is the command link for the working setup.
